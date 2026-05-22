@@ -119,9 +119,9 @@ test.describe('Kingdom of Agents — Startup', () => {
     expect(state!.activeSessions).toBe(2);
     expect(state!.toolCalls).toBe(47);
     expect(state!.sessionCount).toBe(3);
-    expect(state!.districtCount).toBe(7);
+    expect(state!.districtCount).toBe(8);
     expect(state!.scannedSessions).toBe(3);
-    expect(state!.insightLabels).toContain('Tokens');
+    expect(state!.insightLabels).toContain('Tokens (in/out)');
     expect(state!.opsAttention).toBe('review');
     expect(state!.opsRecommendation).toMatch(/failed.*in /);
     expect(state!.selectedSessionId).toBe('beta4567');
@@ -269,7 +269,7 @@ for (const vp of VIEWPORTS) {
     expect(state!.screenW).toBe(vp.width);
     expect(state!.screenH).toBe(vp.height);
     expect(state!.sessionCount).toBe(3);
-    expect(state!.districtCount).toBe(7);
+    expect(state!.districtCount).toBe(8);
 
     // Layout regression: districts must fit between side panels with at
     // least a small gutter, and inside the central well between the ops

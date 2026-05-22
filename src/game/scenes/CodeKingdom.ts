@@ -2,7 +2,7 @@ declare const Phaser: any;
 
 import { W, H } from './viewport.js';
 
-type KingdomCategory = 'forge' | 'library' | 'terminal' | 'signal' | 'delegates' | 'skills' | 'court' | 'workshop' | 'complete' | 'alert' | 'thinking' | 'waiting' | 'prompt' | 'arrival' | 'activity';
+type KingdomCategory = 'forge' | 'library' | 'terminal' | 'signal' | 'delegates' | 'skills' | 'court' | 'mcp' | 'workshop' | 'complete' | 'alert' | 'thinking' | 'waiting' | 'prompt' | 'arrival' | 'activity';
 
 interface CopilotToolMetric {
   name: string;
@@ -34,6 +34,7 @@ interface CopilotSessionSummary {
   command_count: number;
   web_count: number;
   task_count: number;
+  mcp_count?: number;
   error_count: number;
   turn_count?: number;
   output_tokens: number;
@@ -222,6 +223,7 @@ const DISTRICT_TEXTURES: Record<string, string> = {
   delegates: 'ts-castle-red',
   skills: 'ts-house-purple',
   court: 'ts-castle-yellow',
+  mcp: 'ts-house-blue',
 };
 
 export class CodeKingdomScene extends Phaser.Scene {
@@ -641,7 +643,7 @@ export class CodeKingdomScene extends Phaser.Scene {
     const rightW = Math.min(compact ? 340 : 430, Math.max(280, W * 0.26));
     const rightX = W - rightW - leftX;
 
-    const insightH = Math.min(compact ? 340 : 420, Math.max(280, H * 0.42));
+    const insightH = Math.min(compact ? 370 : 450, Math.max(310, H * 0.42));
     // sessionH floor must accommodate picker header (22) + pickerTop offset
     // (22) + at least one row (28) + footer (14) + reserved details block
     // (168) + margin → ~294. Compact cap bumped accordingly so the row
@@ -690,8 +692,15 @@ export class CodeKingdomScene extends Phaser.Scene {
     const districtR = Math.max(36, Math.min(64 * s, minRingRadius * 0.42));
     const districtSize = districtR * 2;
 
+    // Label + count text block below each district sprite occupies
+    // ~46*s + 14 + labelSize + countSize pixels (see drawDistricts).
+    // For typical s=1, labelSize=14, countSize=18 → ~92px. Reserve
+    // this on the bottom side of the ring so the bottom district's
+    // count text doesn't run into the inspector panel below the well.
+    const labelStackH = Math.round(46 * s + 14 + Math.max(14, districtR * 0.22) + Math.max(18, districtR * 0.26));
+
     const radiusX = Math.max(120, rawRadiusX - districtR);
-    const radiusY = Math.max(100, rawRadiusY - districtR);
+    const radiusY = Math.max(100, rawRadiusY - Math.max(districtR, labelStackH));
     const topLift = Math.min(districtR * 0.6, Math.max(0, wellTop - opsY - opsH - districtR * 1.4));
 
     return {
@@ -715,7 +724,7 @@ export class CodeKingdomScene extends Phaser.Scene {
     const counts = this.compute24hCategoryCounts();
 
     const layout = this.layout ?? this.computeLayout();
-    const { centerX, centerY, radiusX, radiusY, topLift } = layout;
+    const { centerX, centerY, radiusX, radiusY, topLift, s } = layout;
     const specs: Omit<District, 'x' | 'y' | 'count'>[] = [
       { key: 'forge', label: 'Forge', short: 'Edits', color: 0xff8a3d },
       { key: 'library', label: 'Library', short: 'Reads', color: 0x61d6ff },
@@ -724,15 +733,29 @@ export class CodeKingdomScene extends Phaser.Scene {
       { key: 'delegates', label: 'Guild Hall', short: 'Agents', color: 0xff6bd6 },
       { key: 'skills', label: 'Tome Hall', short: 'Skills', color: 0xc56bff },
       { key: 'court', label: 'Royal Court', short: 'Intent', color: 0xffd54a },
+      { key: 'mcp', label: 'Envoy House', short: 'MCP', color: 0x4ad6a8 },
     ];
+
+    // Even 45° spacing keeps the ring a true circle around the castle
+    // — cos is preserved so the horizontal positions stay symmetric.
+    // We then nudge ONLY the four diagonals vertically: upper diagonals
+    // (Reads, MCP) shift up, lower diagonals (Web/Docs, Skills) shift
+    // down. This opens a visible vertical gap between the diagonals and
+    // the side districts (Commands, Intent) at sin=0 so their labels
+    // and brackets don't visually crowd each other. Cardinal positions
+    // (top/bottom/sides) stay on the geometric circle.
+    const diagonalShift = Math.round(22 * Math.max(s, 0.85));
 
     return specs.map((spec, index) => {
       const angle = -Math.PI / 2 + (Math.PI * 2 * index) / specs.length;
       const lift = index === 0 ? topLift : 0;
+      const sinA = Math.sin(angle);
+      const isDiagonal = Math.abs(sinA) > 0.1 && Math.abs(sinA) < 0.95;
+      const diagY = isDiagonal ? Math.sign(sinA) * diagonalShift : 0;
       return {
         ...spec,
         x: centerX + Math.cos(angle) * radiusX,
-        y: centerY + Math.sin(angle) * radiusY - lift,
+        y: centerY + sinA * radiusY - lift + diagY,
         count: counts.get(spec.key) ?? 0,
       };
     });
@@ -1068,11 +1091,15 @@ export class CodeKingdomScene extends Phaser.Scene {
     const cardGap = compact ? 8 : 12;
     const cardCols = 2;
     const cardRows = Math.ceil(this.insightCards.length / cardCols);
-    // Bars block: header + 5 rows of (compact 18px / normal 22px) + bottom gap.
+    // Bars block: header + 6 rows (Read/Edit/Cmd/Web/Agent/MCP) of
+    // (compact 18px / normal 22px) + bottom gap. Keep the row count in
+    // sync with `drawWorkMixBars` — that's the single source of truth
+    // for which categories appear here.
     const barRowPitch = compact ? 18 : 22;
     const barsHeaderH = compact ? 22 : 28;
     const barsBottomGap = compact ? 12 : 16;
-    const barsContentH = barsHeaderH + 5 * barRowPitch + barsBottomGap;
+    const barRowCount = 6;
+    const barsContentH = barsHeaderH + barRowCount * barRowPitch + barsBottomGap;
     const cardsAreaH = Math.max(140, insightH - 64 - barsContentH - 16);
     const cardH = Math.max(60, Math.min(82, (cardsAreaH - cardGap * (cardRows - 1)) / cardRows));
     const cardW = (panelW - 36 - cardGap) / cardCols;
@@ -1097,7 +1124,18 @@ export class CodeKingdomScene extends Phaser.Scene {
     const feedH = Math.max(140, bottomY - feedY - 16);
     this.drawPanel(rightX, feedY, rightW, feedH, this.isAtLive() ? 'Activity Feed' : 'Activity Feed · replay view');
     const visibleLog = this.eventLog.slice(0, this.replayCursor);
-    const feed = visibleLog.slice(-10).reverse();
+    // Drop anything older than FADE_END_S so the feed self-prunes
+    // — old rows fade in for the last ~4 min of their lifetime, then
+    // disappear. Replay timeline is unaffected (it uses eventLog
+    // directly, not the filtered feed).
+    const FADE_START_S = 60;
+    const FADE_END_S = 300;
+    const nowMs = Date.now();
+    const enrichedFeed = visibleLog.slice(-30).reverse().map(event => ({
+      event,
+      ageS: eventAgeSeconds(event.timestamp, nowMs),
+    })).filter(({ ageS }) => ageS <= FADE_END_S);
+    const feed = enrichedFeed;
     if (feed.length === 0) {
       const message = this.activity.available
         ? 'No recent Copilot events found. Start a Copilot CLI session and this kingdom will wake up.'
@@ -1114,15 +1152,19 @@ export class CodeKingdomScene extends Phaser.Scene {
       const maxRows = Math.max(1, Math.floor((feedH - rowTopOffset - bottomPadding) / rowPitch));
       const visibleFeed = feed.slice(0, maxRows);
       for (let i = 0; i < visibleFeed.length; i++) {
-        const event = visibleFeed[i];
+        const { event, ageS } = visibleFeed[i];
         const y = feedY + rowTopOffset + i * rowPitch;
         const color = event.success ? categoryColor(event.category) : 0xff5252;
-        this.ui.fillStyle(color, 0.16);
+        // Linear fade between FADE_START_S and FADE_END_S, floored at
+        // 0.2 so a row stays just visible right before it drops out.
+        const fadeT = Math.max(0, Math.min(1, (ageS - FADE_START_S) / (FADE_END_S - FADE_START_S)));
+        const alpha = 1 - fadeT * 0.8;
+        this.ui.fillStyle(color, 0.16 * alpha);
         this.ui.fillRoundedRect(rightX + 18, y - 4, rightW - 36, 26, 8);
-        this.ui.fillStyle(color, 1);
+        this.ui.fillStyle(color, alpha);
         this.ui.fillCircle(rightX + 34, y + 9, 5);
-        this.addText(rightX + 48, y, feedLabel(event), 12, theme.text).setOrigin(0, 0);
-        this.addText(rightX + rightW - 22, y, event.session_id, 10, theme.muted).setOrigin(1, 0);
+        this.addText(rightX + 48, y, feedLabel(event), 12, theme.text).setOrigin(0, 0).setAlpha(alpha);
+        this.addText(rightX + rightW - 22, y, `${formatAge(ageS)} ago`, 10, theme.muted).setOrigin(1, 0).setAlpha(alpha);
       }
     }
 
@@ -1163,6 +1205,7 @@ export class CodeKingdomScene extends Phaser.Scene {
       ['Cmd', mix.command, categoryColor('terminal')],
       ['Web', mix.web, categoryColor('signal')],
       ['Agent', mix.task, categoryColor('delegates')],
+      ['MCP', mix.mcp, categoryColor('mcp')],
     ];
     const max = Math.max(1, ...rows.map(([, value]) => value));
     const barH = Math.min(12, rowPitch - 6);
@@ -1302,7 +1345,10 @@ export class CodeKingdomScene extends Phaser.Scene {
     this.ui.fillRoundedRect(x, y, w, h, 6);
     this.ui.lineStyle(1, cssToHex(fg), 0.7);
     this.ui.strokeRoundedRect(x, y, w, h, 6);
-    this.addText(x + 10, y + 5, label, 10, fg).setOrigin(0, 0);
+    // Center the label vertically inside the button. Origin (0, 0.5)
+    // anchors the text's vertical midpoint to y + h/2 regardless of
+    // button height, so taller buttons stay centered.
+    this.addText(x + 12, y + h / 2, label, 12, fg).setOrigin(0, 0.5);
   }
 
   private drawDistrictInspector(x: number, y: number, w: number, h: number) {
@@ -1360,15 +1406,19 @@ export class CodeKingdomScene extends Phaser.Scene {
     }
   }
 
-  /// Pinned > hovered > selected. Pinning is the user's deliberate
-  /// choice so it wins over passive hover. Selected is the keyboard
-  /// fallback for parity.
+  /// Hover > pinned > selected. Hover always wins so users can quickly
+  /// glance at each district by mousing over — they don't have to click
+  /// each one. Click still "pins" so the panel keeps showing the
+  /// selected district when the pointer moves away to read details.
+  /// Keyboard `selectedDistrict` is the final fallback for accessibility.
   private activeInspectedDistrict(): District | undefined {
+    const hovered = this.districts[this.hoveredDistrictIndex];
+    if (hovered) return hovered;
     if (this.pinnedDistrictKey) {
       const pinned = this.districts.find(d => d.key === this.pinnedDistrictKey);
       if (pinned) return pinned;
     }
-    return this.districts[this.hoveredDistrictIndex] ?? this.districts[this.selectedDistrict];
+    return this.districts[this.selectedDistrict];
   }
 
   /// Aggregate live stats for the district inspector: top tool, total
@@ -2360,8 +2410,9 @@ function workMix(activity: CopilotActivity) {
       command: mix.command + session.command_count,
       web: mix.web + session.web_count,
       task: mix.task + session.task_count,
+      mcp: mix.mcp + (session.mcp_count ?? 0),
     }),
-    { read: 0, write: 0, command: 0, web: 0, task: 0 },
+    { read: 0, write: 0, command: 0, web: 0, task: 0, mcp: 0 },
   );
 }
 
@@ -2452,6 +2503,7 @@ function applyDemoEvent(activity: CopilotActivity, event: CopilotEventSummary): 
       command_count: districtKey === 'terminal' ? session.command_count + 1 : session.command_count,
       web_count: districtKey === 'signal' ? session.web_count + 1 : session.web_count,
       task_count: districtKey === 'delegates' ? session.task_count + 1 : session.task_count,
+      mcp_count: districtKey === 'mcp' ? (session.mcp_count ?? 0) + 1 : (session.mcp_count ?? 0),
       error_count: event.success ? session.error_count : session.error_count + 1,
       output_tokens: session.output_tokens + 120,
       last_tool: event.tool,
@@ -2520,7 +2572,7 @@ function eventKey(event: CopilotEventSummary) {
 
 function districtKeyForEvent(event: CopilotEventSummary): KingdomCategory | null {
   const category = event.category;
-  if (category === 'forge' || category === 'library' || category === 'terminal' || category === 'signal' || category === 'delegates' || category === 'skills' || category === 'court') {
+  if (category === 'forge' || category === 'library' || category === 'terminal' || category === 'signal' || category === 'delegates' || category === 'skills' || category === 'court' || category === 'mcp') {
     return category;
   }
   if (category === 'alert') return 'terminal';
@@ -2557,6 +2609,7 @@ function categoryColor(category: string) {
     case 'delegates': return 0xff6bd6;
     case 'skills': return 0xc56bff;
     case 'court': return 0xffd54a;
+    case 'mcp': return 0x4ad6a8;
     case 'alert': return 0xff5252;
     default: return 0x9aa6c8;
   }
@@ -2610,6 +2663,15 @@ function formatAge(seconds?: number) {
   if (seconds < 60) return `${seconds}s`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
   return `${Math.floor(seconds / 3600)}h`;
+}
+
+/// Parses the ISO timestamp Rust emits on each `CopilotEventSummary`
+/// and returns the elapsed seconds vs `nowMs`. Falls back to 0 for
+/// malformed timestamps so the feed never crashes on bad input.
+function eventAgeSeconds(timestamp: string, nowMs = Date.now()): number {
+  const t = Date.parse(timestamp);
+  if (Number.isNaN(t)) return 0;
+  return Math.max(0, Math.floor((nowMs - t) / 1000));
 }
 
 function eventLabel(kind?: string, category?: string) {

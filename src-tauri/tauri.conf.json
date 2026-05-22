@@ -29,11 +29,6 @@
     ],
     "security": {
       "csp": "default-src 'self' asset: https://asset.localhost; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: https://asset.localhost data: blob:; media-src 'self' asset: https://asset.localhost data: blob:; connect-src 'self' asset: https://asset.localhost blob: ipc: http://ipc.localhost"
-    },
-    "trayIcon": {
-      "iconPath": "icons/128x128.png",
-      "iconAsTemplate": false,
-      "tooltip": "Kingdom of Agents"
     }
   },
   "bundle": {

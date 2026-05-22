@@ -66,6 +66,11 @@ pub struct AgentSessionSummary {
     pub command_count: usize,
     pub web_count: usize,
     pub task_count: usize,
+    /// Tools served by MCP servers (github-mcp-server-*, context7-*,
+    /// kit-dev-mcp-*, etc.) — separate bucket because they sit on a
+    /// dedicated district in the renderer.
+    #[serde(default)]
+    pub mcp_count: usize,
     pub error_count: usize,
     /// Count of assistant.turn_start events for this session. Lets the
     /// renderer surface a "turns" metric (one turn = one model round
@@ -682,6 +687,7 @@ fn summarize_events(
                 "terminal" => summary.command_count += 1,
                 "signal" => summary.web_count += 1,
                 "delegates" | "skills" => summary.task_count += 1,
+                "mcp" => summary.mcp_count += 1,
                 _ => {}
             }
 
@@ -933,6 +939,20 @@ fn classify_tool(raw_name: &str, args: Option<&serde_json::Value>) -> (String, S
 
 fn categorize_tool(tool_name: &str) -> &'static str {
     let name = tool_name.to_ascii_lowercase();
+    // MCP / external integration tools first. Copilot CLI's native
+    // tools (bash, view, edit, grep, glob, create, apply_patch, view,
+    // skill, task, ask_user, report_intent, exit_plan_mode, sql, ...)
+    // all use single words or underscore_only names. Anything with a
+    // hyphen, or with "mcp" in the name, is overwhelmingly an MCP
+    // server tool (github-mcp-server-*, context7-*, kit-dev-mcp-*,
+    // io-github-ChromeDevTools-..., azure-pricing, ide-get_diagnostics,
+    // ...) and belongs in its own bucket regardless of what verb it
+    // happens to use. Without this branch, github-mcp-server-* would
+    // route to Web/Docs alongside native web_fetch, and the rest would
+    // fall through to "workshop" and never appear in any district.
+    if name.contains("mcp") || name.contains('-') {
+        return "mcp";
+    }
     if name.contains("edit")
         || name.contains("create")
         || name.contains("apply_patch")
