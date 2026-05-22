@@ -788,8 +788,12 @@ export class CodeKingdomScene extends Phaser.Scene {
     const opsH = 0;
     const topY = opsY + opsH + (compact ? 14 : 22);
 
-    const panelW = Math.min(compact ? 320 : 390, Math.max(260, W * 0.24));
-    const rightW = Math.min(compact ? 340 : 430, Math.max(280, W * 0.26));
+    const panelW = compact
+      ? Math.min(320, Math.max(260, W * 0.24))
+      : Math.min(500, Math.max(360, W * 0.28));
+    const rightW = compact
+      ? Math.min(340, Math.max(280, W * 0.26))
+      : Math.min(500, Math.max(380, W * 0.28));
     const rightX = W - rightW - leftX;
 
     const insightH = Math.min(compact ? 370 : 450, Math.max(310, H * 0.42));
@@ -981,7 +985,7 @@ export class CodeKingdomScene extends Phaser.Scene {
       { label: 'Active', value: String(this.activity.active_sessions), sub: `${this.activity.scanned_sessions} scanned`, color: this.activity.active_sessions > 0 ? greenAccent : theme.muted },
       { label: 'Tools/min', value: callsPerMin > 0 ? callsPerMin.toFixed(callsPerMin < 10 ? 1 : 0) : '0', sub: `${this.activity.total_tool_calls} total`, color: callsPerMin > 0 ? cyanAccent : theme.muted },
       { label: 'Turns', value: compactNumber(turns), sub: turnsSub, color: turns > 0 ? purpleAccent : theme.muted },
-      { label: 'Tokens · 24h', value: compactNumber(inputTokens + outputTokens), sub: `${compactNumber(inputTokens)} in/${compactNumber(outputTokens)} out`, color: goldAccent },
+      { label: 'Tokens · 24h', value: compactNumber(inputTokens + outputTokens), sub: `${compactNumberShort(inputTokens)}/${compactNumberShort(outputTokens)}`, color: goldAccent },
     ];
   }
 
@@ -1168,10 +1172,22 @@ export class CodeKingdomScene extends Phaser.Scene {
     const active = this.activity.active_sessions;
     const layout = this.layout;
     // Castle scales with the available ring size so it doesn't dwarf
-    // shrunken districts on small screens.
+    // shrunken districts on small screens, AND is hard-capped well
+    // below native (0.78) so it never visually crowds the surrounding
+    // moat / districts on wider windows. 1.0 looked too dominant at
+    // ≥1600 widths; 0.78 keeps the same proportional feel as the
+    // older 1280×800 default. We also cap by the free space inside
+    // the ring (`moatR + districtR + gap <= min(radiusX, radiusY)`)
+    // so the moat never touches a cardinal district on small screens.
+    const districtRingGap = 28;
+    const ringHalf = layout ? Math.min(layout.radiusX, layout.radiusY) : 0;
+    const moatHeadroom = layout
+      ? Math.max(60, ringHalf - layout.districtR - districtRingGap) / 132
+      : Infinity;
+    const castleCap = 0.78;
     const castleScale = layout
-      ? Math.min(s, (layout.districtSize / 132) * 1.05)
-      : s;
+      ? Math.min(s, (layout.districtSize / 132) * 1.05, moatHeadroom, castleCap)
+      : Math.min(s, castleCap);
 
     // (x, y) is the layout center. Castle artwork sits with its visual
     // mass biased toward the upper portion, so we shift the sprite anchor
@@ -1250,8 +1266,8 @@ export class CodeKingdomScene extends Phaser.Scene {
     const barsBottomGap = compact ? 12 : 16;
     const barRowCount = 6;
     const barsContentH = barsHeaderH + barRowCount * barRowPitch + barsBottomGap;
-    const cardsAreaH = Math.max(140, insightH - 64 - barsContentH - 16);
-    const cardH = Math.max(60, Math.min(82, (cardsAreaH - cardGap * (cardRows - 1)) / cardRows));
+    const cardsAreaH = Math.max(120, insightH - 64 - barsContentH - 16);
+    const cardH = Math.max(56, Math.min(82, (cardsAreaH - cardGap * (cardRows - 1)) / cardRows));
     const cardW = (panelW - 36 - cardGap) / cardCols;
     for (let i = 0; i < this.insightCards.length; i++) {
       const card = this.insightCards[i];
@@ -1336,14 +1352,36 @@ export class CodeKingdomScene extends Phaser.Scene {
     this.ui.fillRoundedRect(x, y, w, h, 10);
     this.ui.lineStyle(1, 0x31437a, 0.8);
     this.ui.strokeRoundedRect(x, y, w, h, 10);
-    this.addText(x + 12, y + 8, card.label, 13, theme.muted).setOrigin(0, 0);
+
+    // Hybrid grid layout: label anchored to the TOP, sub anchored to
+    // the BOTTOM, value centered between them. This keeps the label
+    // and sub at consistent absolute offsets from the card edges
+    // (which is what reads as "aligned" across cards in the grid)
+    // while letting the value flex to occupy the middle regardless of
+    // cardH (which compresses to ~56 px at 1280×800 compact and
+    // expands to ~82 px at non-compact sizes). setOrigin(_, 0.5)
+    // anchors each row by its vertical center so font-metric
+    // variations between "1" / "258" / "767k" can't drift the
+    // baseline visibly.
+    const padX = 12;
+    const labelY = y + 14;
+    const subY = y + h - 12;
+    const valueY = (labelY + subY) / 2;
+
+    this.addText(x + padX, labelY, card.label, 13, theme.muted).setOrigin(0, 0.5);
+
     const valueSize = h >= 70 ? 22 : 18;
-    this.addText(x + 12, y + h - (card.sub ? 48 : 28), truncate(card.value, 12), valueSize, card.color ?? theme.text).setOrigin(0, 0);
+    this.addText(x + padX, valueY, truncate(card.value, 12), valueSize, card.color ?? theme.text).setOrigin(0, 0.5);
+
     if (card.sub) {
-      // Cap sub-text width to the card's interior so values like
-      // "929.8k / 331.5k" can't bleed past the rounded border.
-      const subMaxChars = Math.max(8, Math.floor((w - 24) / 8.4));
-      this.addText(x + 12, y + h - 22, truncate(card.sub, subMaxChars), 12, theme.muted).setOrigin(0, 0);
+      // Press Start 2P is monospace with advance ≈ fontSize, so
+      // fontSize 12 renders ~12 px per char — use that to truncate
+      // accurately so the string never overruns the rounded border.
+      // The Tokens sub uses `compactNumberShort` ("925k" vs "924.8k")
+      // so even a narrow 1280×800 card (inner width ~107 px → ~8
+      // chars) shows the full "925k/331k" without trailing ellipsis.
+      const subMaxChars = Math.max(8, Math.floor((w - padX * 2) / 12));
+      this.addText(x + padX, subY, truncate(card.sub, subMaxChars), 12, theme.muted).setOrigin(0, 0.5);
     }
   }
 
@@ -1471,29 +1509,43 @@ export class CodeKingdomScene extends Phaser.Scene {
     // narrow end of the rightW range.
     const innerChars = Math.max(12, Math.floor((w - 44) / 13));
     const lastLabel = eventLabel(session.last_event_kind, session.last_event_category);
-    this.addText(x + 22, detailsY, `Status: ${session.status}`, 14, status).setOrigin(0, 0);
-    this.addText(x + 22, detailsY + 26, `Last: ${truncate(lastLabel, Math.max(6, innerChars - 6))}`, 13, theme.text).setOrigin(0, 0);
-    this.addText(x + 22, detailsY + 50, `Tool: ${truncate(session.last_tool || 'none', Math.max(6, innerChars - 6))}`, 13, theme.muted).setOrigin(0, 0);
     const inTok = session.input_tokens ?? 0;
     const outTok = session.output_tokens;
-    this.addText(x + 22, detailsY + 74, `Age: ${formatAge(session.stale_seconds)}`, 13, theme.muted).setOrigin(0, 0);
     // Tokens are SCOPED TO THIS SESSION ONLY (vs. the Summary
-    // "Tokens · 24h" card which sums across every scanned session in
-    // the cutoff window). The panel header ("Selected Session")
-    // already scopes the label, so we use a short prefix. At very
-    // narrow widths we fall back to a stacked "in / out" form so
-    // neither figure spills past the panel edge.
-    const tokensLine = `Tokens: ${compactNumber(inTok)} in / ${compactNumber(outTok)} out`;
-    let tokensBottomY = detailsY + 96;
-    if (tokensLine.length <= innerChars) {
-      this.addText(x + 22, detailsY + 96, tokensLine, 13, theme.muted).setOrigin(0, 0);
-    } else {
-      this.addText(x + 22, detailsY + 96, `Tokens in:  ${compactNumber(inTok)}`, 13, theme.muted).setOrigin(0, 0);
-      this.addText(x + 22, detailsY + 114, `Tokens out: ${compactNumber(outTok)}`, 13, theme.muted).setOrigin(0, 0);
-      tokensBottomY = detailsY + 114;
+    // "Tokens · 24h" card which sums across every scanned session).
+    // `compactNumberShort` ("184k" vs "184.0k") keeps the single-line
+    // string short enough to fit the right-panel inner width even at
+    // the 1600×1000 default.
+    const tokensLine = `Tokens in ${compactNumberShort(inTok)} / Tokens out ${compactNumberShort(outTok)}`;
+    // CSS-grid-style row layout for the details block. Each row is
+    // centered via setOrigin(0, 0.5) at a uniform pitch. The buttons
+    // anchor to `actionsY = y + h - btnH - 16` (computed below), so
+    // pre-compute that here and shrink `rowPitch` to fit the rows
+    // between detailsY and the buttons. At 1280×800 compact sessionH
+    // ~294 px, available space for 5 rows is only ~80 px → pitch
+    // collapses to ~16 px. At 1600×1000 sessionH 320 px, available
+    // space is ~120 px → pitch lands at the 22 px cap (comfortable
+    // breathing room). This keeps the Tokens row from being clipped
+    // by the "Open in Editor" / "Transcript" buttons at narrow sizes.
+    type DetailRow = { text: string; size: number; color: string };
+    const rows: DetailRow[] = [
+      { text: `Status: ${session.status}`, size: 14, color: status },
+      { text: `Last: ${truncate(lastLabel, Math.max(6, innerChars - 6))}`, size: 13, color: theme.text },
+      { text: `Tool: ${truncate(session.last_tool || 'none', Math.max(6, innerChars - 6))}`, size: 13, color: theme.muted },
+      { text: `Age: ${formatAge(session.stale_seconds)}`, size: 13, color: theme.muted },
+      { text: tokensLine, size: 13, color: theme.muted },
+    ];
+    const btnH = 28;
+    const actionsY = y + h - btnH - 16;
+    const detailsBottom = actionsY - 10; // 10 px gap above the buttons
+    const availableH = Math.max(60, detailsBottom - detailsY);
+    const rowPitch = Math.max(16, Math.min(22, Math.floor(availableH / rows.length)));
+    const firstRowY = detailsY + Math.floor(rowPitch / 2);
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      this.addText(x + 22, firstRowY + i * rowPitch, r.text, r.size, r.color).setOrigin(0, 0.5);
     }
 
-    const btnH = 28;
     const innerW = w - 44;
     const gap = 8;
     const tcalls = session.recent_tool_calls?.length ?? 0;
@@ -1528,7 +1580,13 @@ export class CodeKingdomScene extends Phaser.Scene {
       }
     }
 
-    const actionsY = tokensBottomY + 32;
+    // Buttons anchor to the BOTTOM of the panel rather than flowing
+    // after the token rows. With variable picker rows (1-N sessions)
+    // plus the stacked-tokens fallback, the flowing layout could push
+    // the actions block past `sessionH` and bleed into the Activity
+    // Feed. Anchoring at the bottom means the buttons always sit
+    // inside the panel border; the details rows above shrink their
+    // pitch to fit.
     const editorW = session.git_root ? widthOf(pick.editor, pick.editorMin) : 0;
     if (session.git_root) {
       this.drawSmallButton(x + 22, actionsY, editorW, btnH, pick.editor, '#61d6ff');
@@ -1818,7 +1876,10 @@ export class CodeKingdomScene extends Phaser.Scene {
     const btnSize = 32;
     const btnY = y + (h - btnSize) / 2;
     const playX = x + 14;
-    const liveBtnW = 70;
+    // 84 px is wide enough for "GO LIVE" at fontSize 10 (~70 px) with
+    // ~7 px padding on each side. Bumped from 70 so the bigger LIVE
+    // text + adaptive sizing both have breathing room.
+    const liveBtnW = 84;
     const liveX = x + w - liveBtnW - 14;
 
     this.drawReplayButton(playX, btnY, btnSize, btnSize, this.replayPaused ? '▶' : '⏸', !this.replayPaused);
@@ -1891,10 +1952,17 @@ export class CodeKingdomScene extends Phaser.Scene {
     this.ui.fillRoundedRect(x, y, w, h, 8);
     this.ui.lineStyle(2, accent ? accentStroke : idleStroke, 0.8);
     this.ui.strokeRoundedRect(x, y, w, h, 8);
-    const fontSize = label.length > 2 ? 9 : 14;
+    // Adaptive sizing: single glyphs (play/pause) at 14, short text
+    // labels (LIVE) at 12, longer labels (GO LIVE) at 10. setOrigin
+    // (0.5, 0.5) anchors the text by its visual center so the label
+    // is truly centered in the button regardless of font metrics —
+    // the previous `y + h/2 - fontSize/2` formula consistently sat
+    // ~1-2 px high on Press Start 2P because the font's design line
+    // height is wider than its glyph extent.
+    const fontSize = label.length > 4 ? 10 : label.length > 2 ? 12 : 14;
     const accentText = theme.mode === 'light' ? theme.text : '#ffd54a';
     const idleText = theme.text;
-    this.addText(x + w / 2, y + h / 2 - fontSize / 2, label, fontSize, accent ? accentText : idleText).setOrigin(0.5, 0);
+    this.addText(x + w / 2, y + h / 2, label, fontSize, accent ? accentText : idleText).setOrigin(0.5, 0.5);
   }
 
   private registerReplayInteractions() {
@@ -1935,7 +2003,11 @@ export class CodeKingdomScene extends Phaser.Scene {
       this.ui.fillRoundedRect(x + 10, y + 10, w - 20, 34, 10);
     }
     const titleColor = theme.mode === 'light' ? theme.text : '#ffd54a';
-    this.addText(x + 24, y + 19, title, 14, titleColor).setOrigin(0, 0);
+    // Title baseline: center the text vertically inside the header
+    // rect (y+10 to y+44, mid = y+27) via setOrigin(0, 0.5). The old
+    // y+19 + setOrigin(0,0) put the text top at y+19, leaving the
+    // visual center 4–5 px high.
+    this.addText(x + 24, y + 27, title, 14, titleColor).setOrigin(0, 0.5);
   }
 
   private addText(x: number, y: number, text: string, size: number, color: string) {
@@ -2991,6 +3063,15 @@ function sceneScale() {
 function compactNumber(value: number) {
   if (value >= 1_000_000) return `${Math.round(value / 100_000) / 10}m`;
   if (value >= 1_000) return `${Math.round(value / 100) / 10}k`;
+  return String(value);
+}
+
+/// Integer-rounded variant of `compactNumber` for tight UI slots where
+/// the decimal in "924.8k" would push the string past the available
+/// width. "925k" / "1m" instead of "924.8k" / "1.3m".
+function compactNumberShort(value: number) {
+  if (value >= 1_000_000) return `${Math.round(value / 1_000_000)}m`;
+  if (value >= 1_000) return `${Math.round(value / 1_000)}k`;
   return String(value);
 }
 
