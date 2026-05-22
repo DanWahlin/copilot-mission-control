@@ -905,7 +905,7 @@ export class CodeKingdomScene extends Phaser.Scene {
       { label: 'Active', value: String(this.activity.active_sessions), sub: `${this.activity.scanned_sessions} scanned`, color: this.activity.active_sessions > 0 ? greenAccent : theme.muted },
       { label: 'Tools/min', value: callsPerMin > 0 ? callsPerMin.toFixed(callsPerMin < 10 ? 1 : 0) : '0', sub: `${this.activity.total_tool_calls} total`, color: callsPerMin > 0 ? cyanAccent : theme.muted },
       { label: 'Turns', value: compactNumber(turns), sub: turnsSub, color: turns > 0 ? purpleAccent : theme.muted },
-      { label: 'Tokens · 24h', value: compactNumber(inputTokens + outputTokens), sub: `${compactNumber(inputTokens)} in / ${compactNumber(outputTokens)} out`, color: goldAccent },
+      { label: 'Tokens · 24h', value: compactNumber(inputTokens + outputTokens), sub: `${compactNumber(inputTokens)} in/${compactNumber(outputTokens)} out`, color: goldAccent },
     ];
   }
 
