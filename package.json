@@ -1,0 +1,30 @@
+{
+  "name": "kingdom-of-agents",
+  "version": "0.1.0",
+  "description": "Kingdom of Agents — a live, medieval-themed dashboard for the GitHub Copilot CLI",
+  "scripts": {
+    "build:frontend": "rm -rf dist/game dist/assets && tsc -p tsconfig.renderer.json && cp src/game/index.html dist/game/ && cp src/game/hud.js dist/game/ && cp node_modules/phaser/dist/phaser.min.js dist/game/ && cp -R assets dist/assets",
+    "build": "npm run build:frontend && cd src-tauri && cargo build",
+    "tauri": "tauri",
+    "start": "npm run build:frontend && cd src-tauri && cargo tauri dev",
+    "dev": "cargo tauri dev",
+    "dist": "cargo tauri build",
+    "dist:mac": "cargo tauri build --target universal-apple-darwin",
+    "dist:win": "cargo tauri build --target x86_64-pc-windows-msvc",
+    "dist:linux": "cargo tauri build --target x86_64-unknown-linux-gnu",
+    "test": "npm run build:frontend && npx playwright test",
+    "test:headed": "npm run build:frontend && npx playwright test --headed",
+    "release": "node scripts/release.js"
+  },
+  "author": "Dan Wahlin",
+  "license": "MIT",
+  "devDependencies": {
+    "@playwright/test": "^1.59.1",
+    "@tauri-apps/cli": "^2.0.0",
+    "serve": "^14.2.6",
+    "typescript": "^5.6.0"
+  },
+  "dependencies": {
+    "phaser": "^4.0.0"
+  }
+}

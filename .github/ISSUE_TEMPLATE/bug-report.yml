@@ -1,0 +1,66 @@
+name: 🐛 Bug Report
+description: Report a bug or unexpected behavior in Kingdom of Agents
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug! Please fill out the details below so we can reproduce and fix it.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the bug clearly.
+      placeholder: "When I do X, Y happens instead of Z."
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: How can we reproduce the bug?
+      placeholder: |
+        1. Launch Kingdom of Agents
+        2. Start a Copilot CLI session
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should have happened?
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Windows
+        - Linux
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Kingdom of Agents version
+      description: "Check the tray icon menu or the release you downloaded (e.g., v0.1.0)"
+      placeholder: "v0.1.0"
+
+  - type: input
+    id: copilot-version
+    attributes:
+      label: GitHub Copilot CLI version
+      description: "Output of `copilot --version`"
+      placeholder: "0.x.y"
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots or screen recordings
+      description: If applicable, add screenshots or a short recording to help explain the bug.

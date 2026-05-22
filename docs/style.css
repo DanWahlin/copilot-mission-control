@@ -1,0 +1,115 @@
+:root {
+  --bg: #0a0e22;
+  --bg-strip: linear-gradient(180deg, #161e3d 0%, #0a0e22 100%);
+  --text: #e8ecff;
+  --muted: #93a4d8;
+  --gold: #ffd54a;
+  --gold-strong: #ffba00;
+  --link: #8ed0ff;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, 'Helvetica Neue', sans-serif;
+  line-height: 1.55;
+  min-height: 100%;
+}
+
+.hero {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 64px 24px;
+}
+
+h1 {
+  font-size: 40px;
+  letter-spacing: 0.01em;
+  margin: 0 0 8px;
+  color: var(--gold);
+}
+
+.crown { display: inline-block; margin-right: 6px; }
+
+.tagline {
+  font-size: 18px;
+  color: var(--gold-strong);
+  margin: 0 0 16px;
+}
+
+.body {
+  font-size: 16px;
+  color: var(--text);
+  margin: 0 0 32px;
+}
+
+.cta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 48px;
+}
+
+.cta a {
+  display: inline-block;
+  padding: 10px 18px;
+  border-radius: 6px;
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 15px;
+  transition: transform 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+}
+
+.cta a.primary {
+  background: var(--gold);
+  color: #1a1d2e;
+  border: 1px solid var(--gold-strong);
+}
+.cta a.primary:hover { background: var(--gold-strong); transform: translateY(-1px); }
+
+.cta a.secondary {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+}
+.cta a.secondary:hover {
+  border-color: var(--gold);
+  color: var(--gold);
+}
+
+.status {
+  border-top: 1px solid rgba(255, 213, 74, 0.18);
+  padding-top: 24px;
+}
+
+.status h2 {
+  font-size: 16px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+  margin: 0 0 12px;
+}
+
+.status p {
+  margin: 0;
+  color: var(--text);
+  font-size: 15px;
+}
+
+a {
+  color: var(--link);
+  text-decoration: none;
+}
+a:hover { color: var(--gold); }
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  padding: 1px 6px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 3px;
+}

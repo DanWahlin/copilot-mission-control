@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' blob:;">
+  <title>Kingdom of Agents</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      background: #0a0e22;
+      overflow: hidden;
+      cursor: default;
+      color: #e8ecff;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, 'Helvetica Neue', sans-serif;
+    }
+    body.theme-light, body.theme-light html { background: #eef2fb; color: #1a2240; }
+
+    /* Top navigation bar — app brand, live ops status, and the theme
+       toggle. The ops chip + recommendation + alerts that used to live
+       in the canvas as a separate panel are surfaced here so the
+       kingdom view itself stays uncluttered. */
+    #topbar {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 40px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 0 16px;
+      background:
+        linear-gradient(180deg, #1d2a55 0%, #131b39 60%, #0d1430 100%);
+      border-bottom: 2px solid #ffd54a;
+      box-shadow:
+        0 1px 0 rgba(255, 213, 74, 0.25) inset,
+        0 6px 14px rgba(0, 0, 0, 0.55);
+      font-size: 13px;
+      letter-spacing: 0.06em;
+      user-select: none;
+      -webkit-user-select: none;
+      z-index: 10;
+    }
+    body.theme-light #topbar {
+      background: linear-gradient(180deg, #ffffff 0%, #f3f6fd 60%, #e5ecf8 100%);
+      border-bottom: 2px solid #d8a200;
+      box-shadow:
+        0 1px 0 rgba(216, 162, 0, 0.18) inset,
+        0 6px 14px rgba(15, 30, 70, 0.10);
+    }
+    #topbar .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: #ffd54a;
+      font-weight: 700;
+      text-transform: uppercase;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+      margin-right: auto;
+    }
+    body.theme-light #topbar .brand {
+      color: #8a5d00;
+      text-shadow: none;
+    }
+    #topbar .brand .crown { font-size: 18px; filter: drop-shadow(0 1px 1px rgba(0,0,0,0.6)); }
+    #topbar .divider {
+      width: 1px;
+      height: 18px;
+      background: rgba(255, 213, 74, 0.35);
+    }
+    body.theme-light #topbar .divider { background: rgba(138, 93, 0, 0.35); }
+
+    /* Live ops chip — status word colored by attention severity. */
+    #ops-chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 10px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    #ops-chip.calm   { background: rgba(96, 255, 154, 0.18); color: #60ff9a; border: 1px solid rgba(96,255,154,0.55); }
+    #ops-chip.watch  { background: rgba(255, 213, 74, 0.20); color: #ffd54a; border: 1px solid rgba(255,213,74,0.65); }
+    #ops-chip.review { background: rgba(255, 82, 82, 0.22);  color: #ff8a8a; border: 1px solid rgba(255,82,82,0.7); }
+    body.theme-light #ops-chip.calm   { background: rgba(34, 156, 78, 0.18);  color: #1f7a3a;  border: 1px solid rgba(34,156,78,0.55); }
+    body.theme-light #ops-chip.watch  { background: rgba(184, 134, 11, 0.22); color: #8a5d00;  border: 1px solid rgba(184,134,11,0.65); }
+    body.theme-light #ops-chip.review { background: rgba(190, 28, 28, 0.18);  color: #a01818;  border: 1px solid rgba(190,28,28,0.65); }
+
+    /* Recommendation ticker — single-line truncated to fit available
+       width; full text visible on hover via title attribute. */
+    #ops-rec {
+      flex: 1;
+      min-width: 0;
+      color: #dde4ff;
+      font-size: 12px;
+      letter-spacing: 0.02em;
+      text-transform: none;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    #ops-rec.muted { color: #93a4d8; font-style: italic; }
+    body.theme-light #ops-rec { color: #1a2240; }
+    body.theme-light #ops-rec.muted { color: #5b6a8f; }
+
+    /* Alert badge — only shown when activity.alerts has entries. */
+    #ops-alert {
+      display: none;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 12px;
+      background: rgba(255, 82, 82, 0.18);
+      border: 1px solid rgba(255, 82, 82, 0.7);
+      color: #ff8a8a;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      cursor: help;
+    }
+    #ops-alert.visible { display: inline-flex; }
+    body.theme-light #ops-alert {
+      background: rgba(190, 28, 28, 0.14);
+      border-color: rgba(190, 28, 28, 0.6);
+      color: #a01818;
+    }
+
+    #topbar button {
+      background: transparent;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      color: #e8ecff;
+      padding: 4px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 13px;
+      line-height: 1;
+      transition: background 0.15s ease, border-color 0.15s ease;
+    }
+    #topbar button:hover {
+      background: rgba(255, 255, 255, 0.08);
+      border-color: rgba(255, 213, 74, 0.5);
+    }
+    body.theme-light #topbar button {
+      border-color: rgba(15, 30, 70, 0.18);
+      color: #1a2240;
+    }
+    body.theme-light #topbar button:hover {
+      background: rgba(15, 30, 70, 0.06);
+      border-color: rgba(138, 93, 0, 0.6);
+    }
+    /* Theme toggle button — the icon shows the *target* theme (moon in
+       light mode → click to go dark; sun in dark mode → click to go
+       light). The button bg mirrors that target so the button reads as
+       a preview of where you'll end up. */
+    #theme-btn {
+      background: linear-gradient(180deg, #f6f8fd 0%, #e1e7f3 100%);
+      border-color: rgba(15, 30, 70, 0.18);
+      color: #1a2240;
+    }
+    #theme-btn:hover {
+      background: linear-gradient(180deg, #ffffff 0%, #eaeff8 100%);
+      border-color: rgba(138, 93, 0, 0.6);
+    }
+    body.theme-light #theme-btn {
+      background: linear-gradient(180deg, #1d2a55 0%, #0d1430 100%);
+      border-color: rgba(255, 213, 74, 0.45);
+      color: #ffd54a;
+    }
+    body.theme-light #theme-btn:hover {
+      background: linear-gradient(180deg, #25356c 0%, #131b3d 100%);
+      border-color: rgba(255, 213, 74, 0.85);
+    }
+
+    /* The Phaser canvas mounts inside #game and fills the area below
+       the top bar. Tauri's window-state plugin restores window size on
+       launch; Phaser scales to whatever the viewport ends up being. */
+    #game {
+      position: fixed;
+      top: 40px;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: #0a0e22;
+    }
+    body.theme-light #game { background: #eef2fb; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <div id="topbar">
+    <span class="brand"><span class="crown">🏰</span> Kingdom of Agents</span>
+    <button id="theme-btn" type="button" title="Toggle light/dark theme">🌙</button>
+  </div>
+
+  <div id="game"></div>
+
+  <script src="./hud.js"></script>
+  <script src="./phaser.min.js"></script>
+  <script type="module" src="./game.js"></script>
+</body>
+</html>

@@ -1,0 +1,1083 @@
+//! Agent activity providers.
+//!
+//! Each AI agent (Copilot CLI today, Claude Code / Codex / etc. in the
+//! future) plugs in by implementing [`AgentProvider`]. Each provider
+//! returns a sanitized [`ProviderScan`] containing only allowlisted
+//! summary fields (no prompts, no tool args, no command output, no file
+//! contents, no diffs). The merger [`collect_agent_activity`] composes
+//! provider scans into the [`AgentActivity`] shape consumed by the
+//! Kingdom of Agents scene.
+//!
+//! A filesystem watcher (see [`start_watcher`]) replaces the previous
+//! 5-second renderer poll by emitting a JS callback whenever any
+//! provider's state directory changes. The callback is debounced to
+//! ~300ms so bursty writes coalesce into a single refresh.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{env, fs};
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
+
+use notify::{recommended_watcher, RecursiveMode, Watcher};
+use tauri::{AppHandle, Manager};
+
+// ── Public types serialized to the renderer ───────────────────────────
+
+#[derive(serde::Serialize, Default)]
+pub struct AgentActivity {
+    pub available: bool,
+    pub source: String,
+    pub scanned_sessions: usize,
+    pub active_sessions: usize,
+    pub total_events: usize,
+    pub total_tool_calls: usize,
+    pub total_output_tokens: u64,
+    pub total_input_tokens: u64,
+    /// Total assistant turns observed across all scanned sessions.
+    /// One turn = one model round-trip.
+    #[serde(default)]
+    pub total_turns: usize,
+    pub sessions: Vec<AgentSessionSummary>,
+    pub tools: Vec<AgentToolMetric>,
+    pub recent_events: Vec<AgentEventSummary>,
+    pub alerts: Vec<String>,
+    pub generated_at_ms: u64,
+}
+
+#[derive(serde::Serialize, Default, Clone)]
+pub struct AgentSessionSummary {
+    #[serde(default)]
+    pub provider: String,
+    pub id: String,
+    pub title: String,
+    pub repository: String,
+    pub branch: String,
+    pub updated_at: String,
+    pub is_active: bool,
+    pub status: String,
+    pub event_count: usize,
+    pub tool_count: usize,
+    pub write_count: usize,
+    pub read_count: usize,
+    pub command_count: usize,
+    pub web_count: usize,
+    pub task_count: usize,
+    pub error_count: usize,
+    /// Count of assistant.turn_start events for this session. Lets the
+    /// renderer surface a "turns" metric (one turn = one model round
+    /// trip: user prompt → model thinks/calls tools → model replies).
+    #[serde(default)]
+    pub turn_count: usize,
+    pub output_tokens: u64,
+    pub input_tokens: u64,
+    pub last_tool: String,
+    pub last_event_kind: String,
+    pub last_event_category: String,
+    pub last_event_timestamp: String,
+    pub stale_seconds: u64,
+    /// Absolute path to the session's git root. Exposed so the
+    /// renderer can offer "open in editor" deep links. Empty when the
+    /// workspace.yaml didn't record one.
+    #[serde(default)]
+    pub git_root: String,
+    /// Most recent tool calls for this session (newest last), capped at
+    /// [`MAX_SESSION_TOOL_CALLS`]. Each entry is the privacy-safe
+    /// summary the renderer needs to render a transcript drill-down
+    /// (tool name, category, success, timestamp, duration ms).
+    #[serde(default)]
+    pub recent_tool_calls: Vec<SessionToolCall>,
+}
+
+#[derive(serde::Serialize, Default, Clone)]
+pub struct SessionToolCall {
+    pub tool: String,
+    pub category: String,
+    pub timestamp: String,
+    pub success: bool,
+    /// Duration in ms between matching start/complete events. None when
+    /// the call is still in flight or the complete event is missing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+}
+
+#[derive(serde::Serialize, Clone)]
+pub struct AgentToolMetric {
+    pub name: String,
+    pub category: String,
+    pub count: usize,
+}
+
+#[derive(serde::Serialize, Clone)]
+pub struct AgentEventSummary {
+    #[serde(default)]
+    pub provider: String,
+    pub session_id: String,
+    pub timestamp: String,
+    pub kind: String,
+    pub tool: String,
+    pub category: String,
+    pub success: bool,
+}
+
+// ── Provider abstraction ──────────────────────────────────────────────
+
+/// Raw, un-truncated per-provider scan. The merger handles global
+/// sorting and top-N truncation so providers cannot accidentally drop
+/// events that would have ranked highly across the merged result set.
+pub struct ProviderScan {
+    pub provider: &'static str,
+    pub available: bool,
+    pub sessions: Vec<AgentSessionSummary>,
+    pub tool_counts: BTreeMap<(String, String), usize>,
+    pub recent_events: Vec<AgentEventSummary>,
+    pub alerts: Vec<String>,
+    pub total_events: usize,
+    pub total_tool_calls: usize,
+    pub total_output_tokens: u64,
+    pub total_input_tokens: u64,
+    pub total_turns: usize,
+    pub active_sessions: usize,
+    pub scanned_sessions: usize,
+}
+
+impl ProviderScan {
+    fn unavailable(provider: &'static str) -> Self {
+        Self {
+            provider,
+            available: false,
+            sessions: Vec::new(),
+            tool_counts: BTreeMap::new(),
+            recent_events: Vec::new(),
+            alerts: Vec::new(),
+            total_events: 0,
+            total_tool_calls: 0,
+            total_output_tokens: 0,
+            total_input_tokens: 0,
+            total_turns: 0,
+            active_sessions: 0,
+            scanned_sessions: 0,
+        }
+    }
+}
+
+pub trait AgentProvider: Send + Sync {
+    #[allow(dead_code)]
+    fn id(&self) -> &'static str;
+    #[allow(dead_code)]
+    fn label(&self) -> &'static str;
+    #[allow(dead_code)]
+    fn is_available(&self) -> bool;
+    /// Directory whose changes should trigger a re-scan. None means the
+    /// provider cannot be watched (e.g. it polls a remote endpoint).
+    fn state_root(&self) -> Option<PathBuf>;
+    fn scan(&self) -> ProviderScan;
+}
+
+pub fn default_providers() -> Vec<Box<dyn AgentProvider>> {
+    vec![Box::new(CopilotProvider)]
+}
+
+// ── Top-level merge ───────────────────────────────────────────────────
+
+const MAX_SESSIONS: usize = 12;
+const MAX_TOOLS: usize = 10;
+/// Recent global event feed cap (after merging across providers). Bumped
+/// from 18 → 80 so chatty bursts between scans don't drop events that
+/// the renderer's workMixHistory needs to accumulate per category.
+const MAX_RECENT_EVENTS: usize = 80;
+/// Sessions whose `events.jsonl` has not been touched in this many
+/// seconds are considered stale "ghost" sessions and excluded from
+/// the scan. Without this filter the user's accumulated session-state
+/// directory floods the picker with old runs that aren't relevant to
+/// what they're observing right now.
+const STALE_SESSION_CUTOFF_SECS: u64 = 24 * 60 * 60;
+/// Tool-call entries retained per session for the inspector transcript
+/// drill-down. Bumped from 20 → 120 so low-volume categories (Intent,
+/// Skills, Agents) survive bursts of high-volume categories (bash,
+/// view) without getting evicted from the buffer.
+const MAX_SESSION_TOOL_CALLS: usize = 120;
+
+pub fn collect_agent_activity() -> AgentActivity {
+    let providers = default_providers();
+    let scans: Vec<ProviderScan> = providers.iter().map(|p| p.scan()).collect();
+    merge_scans(scans)
+}
+
+fn merge_scans(scans: Vec<ProviderScan>) -> AgentActivity {
+    let mut activity = AgentActivity {
+        available: scans.iter().any(|s| s.available),
+        source: if scans.len() == 1 {
+            format!("{}-session-state", scans[0].provider)
+        } else {
+            "agent-providers".to_string()
+        },
+        generated_at_ms: unix_ms(SystemTime::now()),
+        ..Default::default()
+    };
+
+    let mut all_sessions: Vec<AgentSessionSummary> = Vec::new();
+    let mut all_events: Vec<AgentEventSummary> = Vec::new();
+    let mut tool_counts: BTreeMap<(String, String), usize> = BTreeMap::new();
+
+    for scan in scans {
+        activity.scanned_sessions += scan.scanned_sessions;
+        activity.active_sessions += scan.active_sessions;
+        activity.total_events += scan.total_events;
+        activity.total_tool_calls += scan.total_tool_calls;
+        activity.total_output_tokens += scan.total_output_tokens;
+        activity.total_input_tokens += scan.total_input_tokens;
+        activity.total_turns += scan.total_turns;
+        activity.alerts.extend(scan.alerts);
+        all_sessions.extend(scan.sessions);
+        all_events.extend(scan.recent_events);
+        for ((name, category), count) in scan.tool_counts {
+            *tool_counts.entry((name, category)).or_insert(0) += count;
+        }
+    }
+
+    // Sessions: prefer active, then most recently touched (smallest stale_seconds).
+    all_sessions.sort_by(|a, b| {
+        b.is_active
+            .cmp(&a.is_active)
+            .then_with(|| a.stale_seconds.cmp(&b.stale_seconds))
+    });
+    all_sessions.truncate(MAX_SESSIONS);
+    activity.sessions = all_sessions;
+
+    let mut tools: Vec<AgentToolMetric> = tool_counts
+        .into_iter()
+        .map(|((name, category), count)| AgentToolMetric {
+            name,
+            category,
+            count,
+        })
+        .collect();
+    tools.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
+    tools.truncate(MAX_TOOLS);
+    activity.tools = tools;
+
+    all_events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    all_events.truncate(MAX_RECENT_EVENTS);
+    activity.recent_events = all_events;
+
+    let failed_tools = activity
+        .recent_events
+        .iter()
+        .filter(|event| event.kind == "tool.execution_complete" && !event.success)
+        .count();
+    if failed_tools > 0 {
+        activity.alerts.push(format!(
+            "{} recent tool failure{} need review.",
+            failed_tools,
+            if failed_tools == 1 { "" } else { "s" }
+        ));
+    }
+    if activity.active_sessions == 0 {
+        activity
+            .alerts
+            .push("No agent sessions active in the last 10 minutes.".to_string());
+    }
+    if !activity.available {
+        activity
+            .alerts
+            .push("No supported agent CLI executables were found on PATH.".to_string());
+    }
+
+    activity
+}
+
+// ── Copilot CLI provider ──────────────────────────────────────────────
+
+pub struct CopilotProvider;
+
+impl AgentProvider for CopilotProvider {
+    fn id(&self) -> &'static str {
+        "copilot"
+    }
+    fn label(&self) -> &'static str {
+        "GitHub Copilot CLI"
+    }
+    fn is_available(&self) -> bool {
+        is_copilot_available()
+    }
+    fn state_root(&self) -> Option<PathBuf> {
+        home_dir().map(|h| h.join(".copilot").join("session-state"))
+    }
+    fn scan(&self) -> ProviderScan {
+        scan_copilot()
+    }
+}
+
+fn scan_copilot() -> ProviderScan {
+    let provider = "copilot";
+    let available = is_copilot_available();
+    let mut scan = ProviderScan::unavailable(provider);
+    scan.available = available;
+
+    let Some(home) = home_dir() else {
+        scan.alerts
+            .push("HOME is not available, so Copilot session state cannot be scanned.".to_string());
+        return scan;
+    };
+
+    let state_dir = home.join(".copilot").join("session-state");
+    if !state_dir.exists() {
+        scan.alerts
+            .push("No ~/.copilot/session-state directory found yet.".to_string());
+        return scan;
+    }
+
+    let mut session_dirs = match fs::read_dir(&state_dir) {
+        Ok(entries) => entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let path = entry.path();
+                if !path.is_dir() {
+                    return None;
+                }
+                let modified = path
+                    .join("events.jsonl")
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .or_else(|_| entry.metadata().and_then(|m| m.modified()))
+                    .unwrap_or(UNIX_EPOCH);
+                // Drop sessions whose event log hasn't changed in the
+                // configured cutoff window. Old session folders never
+                // disappear on disk, so without this filter the picker
+                // ends up dominated by yesterday's work.
+                if let Ok(age) = SystemTime::now().duration_since(modified) {
+                    if age.as_secs() > STALE_SESSION_CUTOFF_SECS {
+                        return None;
+                    }
+                }
+                Some((path, modified))
+            })
+            .collect::<Vec<_>>(),
+        Err(err) => {
+            scan.alerts
+                .push(format!("Unable to scan Copilot session state: {}", err));
+            return scan;
+        }
+    };
+
+    session_dirs.sort_by(|a, b| b.1.cmp(&a.1));
+    // Cap per-provider scan effort but leave global truncation to the merger.
+    session_dirs.truncate(MAX_SESSIONS);
+    scan.scanned_sessions = session_dirs.len();
+
+    let now = SystemTime::now();
+
+    for (session_path, modified) in session_dirs {
+        let session_id = session_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let workspace = parse_workspace(&session_path.join("workspace.yaml"));
+        let age_seconds = now
+            .duration_since(modified)
+            .map(|age| age.as_secs())
+            .unwrap_or(0);
+        let mut summary = AgentSessionSummary {
+            provider: provider.to_string(),
+            id: session_id.chars().take(8).collect(),
+            repository: workspace
+                .get("repository")
+                .cloned()
+                .or_else(|| {
+                    workspace
+                        .get("git_root")
+                        .and_then(|p| Path::new(p).file_name()?.to_str().map(str::to_string))
+                })
+                .unwrap_or_else(|| "unknown repo".to_string()),
+            branch: workspace
+                .get("branch")
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_string()),
+            updated_at: workspace.get("updated_at").cloned().unwrap_or_default(),
+            is_active: age_seconds < 10 * 60,
+            stale_seconds: age_seconds,
+            git_root: workspace.get("git_root").cloned().unwrap_or_default(),
+            ..Default::default()
+        };
+        summary.title = sanitize_session_title(workspace.get("summary"))
+            .unwrap_or_else(|| format!("{} {}", summary.repository, summary.branch));
+
+        summarize_events(
+            provider,
+            &session_path.join("events.jsonl"),
+            &session_id,
+            &mut summary,
+            &mut scan.tool_counts,
+            &mut scan.recent_events,
+        );
+
+        // Active sessions report "working" or "thinking" by activity
+        // level. We intentionally do NOT escalate to "needs-attention"
+        // based on error_count — failed tool calls (view of a missing
+        // file, edit where old_str didn't match, grep with no hits) are
+        // normal LLM exploration noise, not something the dev needs to
+        // act on. If we add real attention signals later (permission
+        // requests, session.error events, model failures), wire those
+        // here instead.
+        summary.status = if summary.is_active && summary.tool_count > 0 {
+            "working".to_string()
+        } else if summary.is_active {
+            "thinking".to_string()
+        } else {
+            "idle".to_string()
+        };
+
+        if summary.is_active {
+            scan.active_sessions += 1;
+        }
+        scan.total_events += summary.event_count;
+        scan.total_tool_calls += summary.tool_count;
+        scan.total_output_tokens += summary.output_tokens;
+        scan.total_input_tokens += summary.input_tokens;
+        scan.total_turns += summary.turn_count;
+        scan.sessions.push(summary);
+    }
+
+    scan
+}
+
+// ── Copilot-specific helpers (kept private to this module) ────────────
+
+fn is_copilot_available() -> bool {
+    candidate_copilot_paths().iter().any(|path| path.is_file())
+}
+
+fn candidate_copilot_paths() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    let names = copilot_executable_names();
+
+    if let Some(path_value) = env::var_os("PATH") {
+        for dir in env::split_paths(&path_value) {
+            for name in &names {
+                candidates.push(dir.join(name));
+            }
+        }
+    }
+
+    if let Some(home) = home_dir() {
+        for dir in [
+            home.join(".local").join("bin"),
+            home.join("bin"),
+            home.join(".npm-global").join("bin"),
+            home.join(".volta").join("bin"),
+            home.join(".yarn").join("bin"),
+        ] {
+            for name in &names {
+                candidates.push(dir.join(name));
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    for dir in [
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+    ] {
+        for name in &names {
+            candidates.push(dir.join(name));
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(appdata) = env::var_os("APPDATA").map(PathBuf::from) {
+            for name in &names {
+                candidates.push(appdata.join("npm").join(name));
+            }
+        }
+        if let Some(localappdata) = env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+            for dir in [
+                localappdata.join("Programs"),
+                localappdata
+                    .join("Microsoft")
+                    .join("WinGet")
+                    .join("Packages"),
+            ] {
+                for name in &names {
+                    candidates.push(dir.join(name));
+                }
+            }
+        }
+    }
+
+    candidates
+}
+
+fn copilot_executable_names() -> Vec<&'static str> {
+    #[cfg(target_os = "windows")]
+    {
+        vec![
+            "copilot.exe",
+            "copilot.cmd",
+            "copilot.bat",
+            "copilot.ps1",
+            "copilot",
+        ]
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        vec!["copilot"]
+    }
+}
+
+pub fn home_dir() -> Option<PathBuf> {
+    if let Some(home) = env::var_os("HOME").map(PathBuf::from) {
+        return Some(home);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(profile) = env::var_os("USERPROFILE").map(PathBuf::from) {
+            return Some(profile);
+        }
+        if let (Some(drive), Some(path)) = (env::var_os("HOMEDRIVE"), env::var_os("HOMEPATH")) {
+            return Some(PathBuf::from(format!(
+                "{}{}",
+                drive.to_string_lossy(),
+                path.to_string_lossy()
+            )));
+        }
+    }
+
+    None
+}
+
+fn unix_ms(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn parse_workspace(path: &Path) -> BTreeMap<String, String> {
+    let mut values = BTreeMap::new();
+    let Ok(content) = fs::read_to_string(path) else {
+        return values;
+    };
+
+    for line in content.lines() {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let key = key.trim();
+        if matches!(
+            key,
+            "id" | "repository" | "branch" | "summary" | "git_root" | "updated_at"
+        ) {
+            values.insert(key.to_string(), value.trim().trim_matches('"').to_string());
+        }
+    }
+
+    values
+}
+
+fn sanitize_session_title(summary: Option<&String>) -> Option<String> {
+    let raw = summary?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    let mut unquoted = String::with_capacity(raw.len());
+    let mut quote: Option<char> = None;
+    for ch in raw.chars() {
+        if matches!(ch, '"' | '\'' | '`') {
+            quote = if quote == Some(ch) { None } else { Some(ch) };
+            unquoted.push(' ');
+        } else if quote.is_none() {
+            unquoted.push(ch);
+        }
+    }
+
+    let mut collapsed = unquoted.split_whitespace().collect::<Vec<_>>().join(" ");
+    const MAX_TITLE_CHARS: usize = 48;
+    if collapsed.chars().count() > MAX_TITLE_CHARS {
+        collapsed = collapsed
+            .chars()
+            .take(MAX_TITLE_CHARS - 1)
+            .collect::<String>();
+        collapsed.push('…');
+    }
+
+    if collapsed.is_empty() {
+        None
+    } else {
+        Some(collapsed)
+    }
+}
+
+fn summarize_events(
+    provider: &'static str,
+    path: &Path,
+    session_id: &str,
+    summary: &mut AgentSessionSummary,
+    tool_counts: &mut BTreeMap<(String, String), usize>,
+    recent_events: &mut Vec<AgentEventSummary>,
+) {
+    let Ok(mut file) = fs::File::open(path) else {
+        return;
+    };
+
+    if let Ok(metadata) = file.metadata() {
+        // Bumped from 512KiB → 8MiB. A long-running Copilot session can
+        // accumulate 50MB+ of events; 512KiB only captured the most
+        // recent ~30-50 tool calls, which meant low-volume categories
+        // like Intent (`report_intent`) were invisible whenever bash
+        // bursts dominated the tail. 8MiB gives ~5-15 minutes of
+        // history on a busy session and parses in a few ms.
+        const MAX_READ_BYTES: u64 = 8 * 1024 * 1024;
+        if metadata.len() > MAX_READ_BYTES {
+            let _ = file.seek(SeekFrom::Start(metadata.len() - MAX_READ_BYTES));
+        }
+    }
+
+    // Pending tool starts keyed by tool name. Lets us compute duration
+    // on the matching complete event without storing the call_id (which
+    // events.jsonl doesn't always set). When two calls to the same tool
+    // overlap we'd lose the inner duration, but Copilot CLI runs tool
+    // calls sequentially within a session so this is safe in practice.
+    let mut pending_starts: BTreeMap<String, (String, String)> = BTreeMap::new();
+    let reader = BufReader::new(file);
+    for line in reader.lines().map_while(Result::ok) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        let event_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let timestamp = value
+            .get("timestamp")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        summary.event_count += 1;
+        let event_category = categorize_event(event_type).to_string();
+        record_last_event(summary, &timestamp, event_type, &event_category);
+
+        if event_type == "tool.execution_start" {
+            let raw_tool_name = value
+                .get("data")
+                .and_then(|data| data.get("toolName"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("tool")
+                .to_string();
+            let args = value
+                .get("data")
+                .and_then(|data| data.get("arguments"));
+            let (tool_name, category) = classify_tool(&raw_tool_name, args);
+            record_last_event(summary, &timestamp, event_type, &category);
+
+            summary.tool_count += 1;
+            summary.last_tool = tool_name.clone();
+            match category.as_str() {
+                "forge" => summary.write_count += 1,
+                "library" => summary.read_count += 1,
+                "terminal" => summary.command_count += 1,
+                "signal" => summary.web_count += 1,
+                "delegates" | "skills" => summary.task_count += 1,
+                _ => {}
+            }
+
+            *tool_counts
+                .entry((tool_name.clone(), category.clone()))
+                .or_insert(0) += 1;
+            recent_events.push(AgentEventSummary {
+                provider: provider.to_string(),
+                session_id: session_id.chars().take(8).collect(),
+                timestamp: timestamp.clone(),
+                kind: event_type.to_string(),
+                tool: tool_name.clone(),
+                category: category.clone(),
+                success: true,
+            });
+
+            // Record an in-flight entry in the per-session transcript;
+            // duration is filled in when the matching complete event
+            // lands. Bounded so a chatty session doesn't blow memory.
+            push_session_tool_call(
+                &mut summary.recent_tool_calls,
+                SessionToolCall {
+                    tool: tool_name.clone(),
+                    category: category.clone(),
+                    timestamp: timestamp.clone(),
+                    success: true,
+                    duration_ms: None,
+                },
+            );
+            pending_starts.insert(tool_name, (timestamp, category));
+        } else if event_type == "tool.execution_complete" {
+            let success = value
+                .get("data")
+                .and_then(|data| data.get("success"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let completion_category = if success { "complete" } else { "alert" };
+            record_last_event(summary, &timestamp, event_type, completion_category);
+            recent_events.push(AgentEventSummary {
+                provider: provider.to_string(),
+                session_id: session_id.chars().take(8).collect(),
+                timestamp: timestamp.clone(),
+                kind: event_type.to_string(),
+                tool: "tool complete".to_string(),
+                category: completion_category.to_string(),
+                success,
+            });
+
+            // Fold the success/duration back into the most-recent tool
+            // call entry whose tool name matches. Keeps the transcript
+            // in chrono order. We also use the stashed category to
+            // decide whether this failure escalates the session to
+            // needs-attention: failed terminal calls (e.g. `grep` with
+            // no matches, `test` returning non-zero) aren't actionable
+            // for the dev — they're normal LLM exploration — so they
+            // don't bump error_count and don't turn the session red.
+            let last_tool = summary.last_tool.clone();
+            if let Some((start_ts, cat)) = pending_starts.remove(&last_tool) {
+                let duration_ms = parse_iso_ms(&timestamp)
+                    .zip(parse_iso_ms(&start_ts))
+                    .and_then(|(end, start)| if end >= start { Some(end - start) } else { None });
+                if let Some(entry) = summary
+                    .recent_tool_calls
+                    .iter_mut()
+                    .rev()
+                    .find(|entry| entry.tool == last_tool && entry.duration_ms.is_none())
+                {
+                    entry.success = success;
+                    entry.duration_ms = duration_ms;
+                }
+                if !success && cat != "terminal" {
+                    summary.error_count += 1;
+                }
+            }
+            // Note: we deliberately do NOT count "orphan" complete events
+            // (no matching start in this scan). Because we only read the
+            // last MAX_READ_BYTES of events.jsonl, the tail often begins
+            // mid-pair — the first few completes routinely have no start
+            // in the window. Counting those would re-flag every long-
+            // running session as needs-attention purely from tail
+            // truncation, even when the live work is fine.
+        } else if event_type == "assistant.message" {
+            if let Some(tokens) = value
+                .get("data")
+                .and_then(|data| data.get("outputTokens"))
+                .and_then(|v| v.as_u64())
+            {
+                summary.output_tokens += tokens;
+            }
+            if let Some(tokens) = value
+                .get("data")
+                .and_then(|data| data.get("inputTokens"))
+                .and_then(|v| v.as_u64())
+            {
+                summary.input_tokens += tokens;
+            }
+        } else if event_type == "session.compaction_complete" {
+            // Copilot doesn't emit input tokens per assistant.message,
+            // so accumulate the input tokens reported on each periodic
+            // compaction. This is the only running-total signal we get
+            // during a live session.
+            if let Some(used) = value.get("data").and_then(|d| d.get("compactionTokensUsed")) {
+                if let Some(n) = used.get("inputTokens").and_then(|v| v.as_u64()) {
+                    summary.input_tokens += n;
+                }
+                if let Some(n) = used.get("outputTokens").and_then(|v| v.as_u64()) {
+                    summary.output_tokens += n;
+                }
+            }
+        } else if event_type == "session.shutdown" {
+            // On shutdown Copilot emits the cumulative session totals.
+            // Use max() against any compaction-accumulated value so we
+            // don't double-count yet still report a non-zero figure.
+            if let Some(details) = value.get("data").and_then(|d| d.get("tokenDetails")) {
+                let fresh = details
+                    .get("input").and_then(|v| v.get("tokenCount")).and_then(|v| v.as_u64()).unwrap_or(0);
+                let cache_read = details
+                    .get("cache_read").and_then(|v| v.get("tokenCount")).and_then(|v| v.as_u64()).unwrap_or(0);
+                let cache_write = details
+                    .get("cache_write").and_then(|v| v.get("tokenCount")).and_then(|v| v.as_u64()).unwrap_or(0);
+                let total_in = fresh + cache_read + cache_write;
+                if total_in > summary.input_tokens {
+                    summary.input_tokens = total_in;
+                }
+                let out = details
+                    .get("output").and_then(|v| v.get("tokenCount")).and_then(|v| v.as_u64()).unwrap_or(0);
+                if out > summary.output_tokens {
+                    summary.output_tokens = out;
+                }
+            }
+        } else if matches!(
+            event_type,
+            "assistant.turn_start" | "assistant.turn_end" | "user.message" | "session.start"
+        ) {
+            if event_type == "assistant.turn_start" {
+                summary.turn_count += 1;
+            }
+            recent_events.push(AgentEventSummary {
+                provider: provider.to_string(),
+                session_id: session_id.chars().take(8).collect(),
+                timestamp,
+                kind: event_type.to_string(),
+                tool: String::new(),
+                category: categorize_event(event_type).to_string(),
+                success: true,
+            });
+        }
+    }
+}
+
+fn push_session_tool_call(buf: &mut Vec<SessionToolCall>, call: SessionToolCall) {
+    buf.push(call);
+    if buf.len() > MAX_SESSION_TOOL_CALLS {
+        let overflow = buf.len() - MAX_SESSION_TOOL_CALLS;
+        buf.drain(0..overflow);
+    }
+}
+
+/// Parse "2026-05-21T07:14:00.123Z" (or without ms) into unix epoch ms.
+/// Best-effort: returns None on malformed input rather than failing the
+/// whole scan. We only need the millisecond delta for durations.
+fn parse_iso_ms(s: &str) -> Option<u64> {
+    if s.is_empty() {
+        return None;
+    }
+    // Split date/time on 'T'
+    let (date, rest) = s.split_once('T')?;
+    let time = rest.trim_end_matches('Z');
+    let date_parts: Vec<&str> = date.split('-').collect();
+    if date_parts.len() != 3 {
+        return None;
+    }
+    let year: i64 = date_parts[0].parse().ok()?;
+    let month: i64 = date_parts[1].parse().ok()?;
+    let day: i64 = date_parts[2].parse().ok()?;
+
+    let (hms, frac) = time.split_once('.').unwrap_or((time, "0"));
+    let time_parts: Vec<&str> = hms.split(':').collect();
+    if time_parts.len() < 2 {
+        return None;
+    }
+    let hour: i64 = time_parts[0].parse().ok()?;
+    let minute: i64 = time_parts[1].parse().ok()?;
+    let second: i64 = time_parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+    // Pad/truncate frac to 3 digits for ms.
+    let mut ms_str = String::from(frac);
+    ms_str.truncate(3);
+    while ms_str.len() < 3 {
+        ms_str.push('0');
+    }
+    let ms: i64 = ms_str.parse().ok()?;
+
+    // Convert (UTC) civil date to days since epoch using the Howard
+    // Hinnant algorithm; avoids pulling in a date crate just for this.
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = (y - era * 400) as i64;
+    let m = month as i64;
+    let d = day as i64;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    let total_secs = days * 86_400 + hour * 3600 + minute * 60 + second;
+    if total_secs < 0 {
+        return None;
+    }
+    Some((total_secs as u64) * 1000 + ms as u64)
+}
+
+fn record_last_event(
+    summary: &mut AgentSessionSummary,
+    timestamp: &str,
+    event_type: &str,
+    category: &str,
+) {
+    if timestamp.is_empty() || timestamp >= summary.last_event_timestamp.as_str() {
+        summary.last_event_timestamp = timestamp.to_string();
+        summary.last_event_kind = event_type.to_string();
+        summary.last_event_category = category.to_string();
+    }
+}
+
+fn classify_tool(raw_name: &str, args: Option<&serde_json::Value>) -> (String, String) {
+    // Meta-tools like `skill` and `task` carry their real identity in
+    // their arguments (skill name, sub-agent type). Surfacing those
+    // identifiers makes the activity feed and tool ranking actually
+    // useful. We allowlist only the static identifier fields — no
+    // prompt text or other args cross the boundary.
+    let lower = raw_name.to_ascii_lowercase();
+    if lower == "skill" {
+        let skill_name = args
+            .and_then(|a| a.get("skill"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("skill")
+            .to_string();
+        return (skill_name, "skills".to_string());
+    }
+    if lower == "task" {
+        let subagent = args
+            .and_then(|a| a.get("subagent_type"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("task")
+            .to_string();
+        return (subagent, "delegates".to_string());
+    }
+    let category = categorize_tool(raw_name).to_string();
+    (raw_name.to_string(), category)
+}
+
+fn categorize_tool(tool_name: &str) -> &'static str {
+    let name = tool_name.to_ascii_lowercase();
+    if name.contains("edit")
+        || name.contains("create")
+        || name.contains("apply_patch")
+        || name.contains("write")
+    {
+        "forge"
+    } else if name.contains("view")
+        || name.contains("read")
+        || name.contains("grep")
+        || name.contains("rg")
+        || name.contains("glob")
+        || name.contains("search")
+    {
+        "library"
+    } else if name.contains("bash")
+        || name.contains("shell")
+        || name.contains("sql")
+        || name.contains("test")
+    {
+        "terminal"
+    } else if name.contains("web")
+        || name.contains("fetch")
+        || name.contains("docs")
+        || name.contains("github")
+    {
+        "signal"
+    } else if name.contains("skill") {
+        "skills"
+    } else if name.contains("task") || name.contains("agent") {
+        "delegates"
+    } else if name.contains("ask") || name.contains("report_intent") {
+        "court"
+    } else {
+        "workshop"
+    }
+}
+
+fn categorize_event(event_type: &str) -> &'static str {
+    match event_type {
+        "assistant.turn_start" => "thinking",
+        "assistant.turn_end" => "waiting",
+        "user.message" => "prompt",
+        "session.start" => "arrival",
+        _ => "activity",
+    }
+}
+
+// ── Filesystem watcher ────────────────────────────────────────────────
+
+/// Spawn a background thread that watches each provider's state root
+/// and, on any filesystem change, debounces to ~300 ms before invoking
+/// `window.__koaOnAgentActivityChanged()` in the renderer.
+///
+/// Returns nothing intentionally: the watcher lives for the entire app
+/// lifetime and is dropped automatically on shutdown.
+pub fn start_watcher(app: AppHandle) {
+    let providers = default_providers();
+    let mut watch_targets: Vec<(PathBuf, RecursiveMode)> = Vec::new();
+
+    for provider in providers {
+        let Some(root) = provider.state_root() else {
+            continue;
+        };
+        // Prefer the narrow state_root; fall back to its parent for
+        // creation events if the root doesn't exist yet.
+        if root.exists() {
+            watch_targets.push((root, RecursiveMode::Recursive));
+        } else if let Some(parent) = root.parent() {
+            if parent.exists() {
+                watch_targets.push((parent.to_path_buf(), RecursiveMode::NonRecursive));
+                log::info!(
+                    "Watching {} non-recursively until {} exists",
+                    parent.display(),
+                    root.display()
+                );
+            } else {
+                log::warn!(
+                    "Cannot watch {}: parent does not exist either; relying on poll fallback",
+                    root.display()
+                );
+            }
+        }
+    }
+
+    if watch_targets.is_empty() {
+        log::info!("No provider state directories to watch; renderer poll fallback will refresh");
+        return;
+    }
+
+    thread::spawn(move || {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut watcher = match recommended_watcher(tx) {
+            Ok(w) => w,
+            Err(err) => {
+                log::warn!("Failed to create filesystem watcher: {}", err);
+                return;
+            }
+        };
+
+        for (path, mode) in &watch_targets {
+            if let Err(err) = watcher.watch(path, *mode) {
+                log::warn!("Failed to watch {}: {}", path.display(), err);
+            }
+        }
+
+        let pending = Arc::new(AtomicBool::new(false));
+
+        while let Ok(event) = rx.recv() {
+            // Filter: only react to files our scan actually reads.
+            // Avoids needless rescans on rewind-snapshots, sqlite
+            // journals, and other noise inside session dirs.
+            let Ok(event) = event else { continue };
+            if !event.paths.iter().any(|p| is_relevant_path(p)) {
+                continue;
+            }
+
+            // Coalesce: only spawn an emit-timer if one isn't already in
+            // flight. Any events that arrive while the timer is pending
+            // are absorbed and emitted together at the timer's end.
+            if pending.swap(true, Ordering::SeqCst) {
+                continue;
+            }
+            let pending_clone = pending.clone();
+            let app_clone = app.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(300));
+                pending_clone.store(false, Ordering::SeqCst);
+                if let Some(win) = app_clone.get_webview_window("main") {
+                    let _ = win.eval(
+                        "window.__koaOnAgentActivityChanged && \
+                         window.__koaOnAgentActivityChanged()",
+                    );
+                }
+            });
+        }
+    });
+}
+
+/// Paths whose changes warrant a re-scan. The scan reads
+/// `events.jsonl` per session for activity and `workspace.yaml` for
+/// session metadata (title, repository, branch). Everything else in a
+/// session dir (sqlite journals, rewind snapshots, etc.) is ignored.
+fn is_relevant_path(path: &Path) -> bool {
+    match path.file_name().and_then(|n| n.to_str()) {
+        Some("events.jsonl") | Some("workspace.yaml") => true,
+        _ => false,
+    }
+}

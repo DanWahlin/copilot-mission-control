@@ -1,0 +1,15 @@
+{
+  "identifier": "main-capability",
+  "description": "Main window capability for Kingdom of Agents",
+  "windows": ["main"],
+  "permissions": [
+    "core:window:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-focus",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-minimize",
+    "core:event:default",
+    "opener:default"
+  ]
+}

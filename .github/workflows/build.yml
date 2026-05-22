@@ -1,0 +1,175 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            platform: mac
+            args: '--target universal-apple-darwin'
+          - os: windows-latest
+            platform: win
+            args: ''
+          - os: ubuntu-22.04
+            platform: linux
+            args: ''
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'mac' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build:frontend
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: ${{ matrix.args }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kingdom-of-agents-${{ matrix.platform }}
+          path: |
+            src-tauri/target/**/release/bundle/**/*.dmg
+            src-tauri/target/**/release/bundle/**/*.exe
+            src-tauri/target/**/release/bundle/**/*.msi
+            src-tauri/target/**/release/bundle/**/*.AppImage
+            src-tauri/target/**/release/bundle/**/*.deb
+            src-tauri/target/**/release/bundle/**/*.rpm
+            src-tauri/target/**/release/bundle/**/*.app.tar.gz
+            src-tauri/target/**/release/bundle/**/*.nsis.zip
+          if-no-files-found: warn
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate release notes
+        uses: orhun/git-cliff-action@v4
+        id: changelog
+        with:
+          config: cliff.toml
+          args: --latest --strip header
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: find artifacts -type f | sort
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/**/*
+          draft: false
+          prerelease: false
+          body: |
+            ## 🏰 Download Kingdom of Agents
+
+            A live, medieval-themed dashboard for the GitHub Copilot CLI. Watch your Copilot sessions become a living kingdom of tools, agents, and alerts.
+
+            ### 🤖 Install this using the Copilot CLI
+
+            If you have [GitHub Copilot CLI](https://github.com/features/copilot/cli/) installed, you can install Kingdom of Agents with a single prompt:
+
+            ```
+            copilot --allow-all -p "Install the latest version of this app for me https://github.com/DanWahlin/kingdom-of-agents/releases"
+            ```
+
+            > **Note:** The app is not code-signed, so after installing you'll still need to manually run the commands shown below for your operating system.
+
+            Or download the installer for your OS from the **Assets** list below.
+
+            ### 🍎 macOS
+            | File | Description |
+            |------|-------------|
+            | `*.dmg` | macOS installer (Universal — Apple Silicon + Intel) |
+
+            > Download the `.dmg` file from the **Assets** list below.
+            >
+            > **Note:** The app is not code-signed. After installing, open Terminal and run:
+            > ```
+            > sudo xattr -rd com.apple.quarantine /Applications/Kingdom\ of\ Agents.app
+            > ```
+
+            ### 🪟 Windows
+            | File | Description |
+            |------|-------------|
+            | `*.msi` | Windows installer (x64) |
+
+            > Download the `.msi` file from the **Assets** list below.
+            >
+            > **Note:** The app is not code-signed, so Windows may flag it:
+            > 1. If your browser warns about the download, select **"Keep"**
+            > 2. When you see "Windows protected your PC", click **"More info"**
+            > 3. Then click **"Run anyway"**
+
+            ### 🐧 Linux
+            | File | Description |
+            |------|-------------|
+            | `*.AppImage` | Universal Linux (run anywhere) |
+            | `*.deb` | Debian/Ubuntu package |
+
+            > Download the `.AppImage` or `.deb` file from the **Assets** list below.
+            >
+            > **Note:** For the AppImage, make it executable first:
+            > ```
+            > chmod +x Kingdom-of-Agents_*.AppImage
+            > ./Kingdom-of-Agents_*.AppImage
+            > ```
+
+            ---
+            *Built with Tauri + Phaser + TypeScript.*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
