@@ -66,7 +66,6 @@ async function getKingdomState(page: Page) {
       toolCalls: scene.activity?.total_tool_calls,
       sessionCount: scene.activity?.sessions?.length ?? 0,
       districtCount: scene.districts?.length ?? 0,
-      selectedDistrict: scene.selectedDistrict,
       selectedSessionId: scene.selectedSession?.id,
       sessionPickerRows: scene.sessionPickerRows ?? [],
       activeEventPulseCount: scene.activeEventPulseCount ?? 0,

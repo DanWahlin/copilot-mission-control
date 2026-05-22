@@ -333,7 +333,6 @@ export class CodeKingdomScene extends Phaser.Scene {
   /// keep working. Toggled from the topbar button via the global
   /// `__koaSetPanelsHidden` hook; persisted in localStorage.
   private panelsHidden = false;
-  private selectedDistrict = 0;
   private hoveredDistrictIndex = -1;
   // Sticky last-hover: persists when the pointer leaves the ring so the
   // district inspector keeps showing the last thing the user pointed at,
@@ -849,9 +848,14 @@ export class CodeKingdomScene extends Phaser.Scene {
     // strip and details stop overlapping at 1024×768 and 1280×800.
     const sessionH = Math.min(compact ? 320 : 360, Math.max(294, H * 0.32));
 
-    const replayH = compact ? 48 : 56;
+    // Replay strip is hidden in focus mode so the district inspector
+    // can drop to the bottom edge and the kingdom ring picks up the
+    // recovered vertical room. replayY is parked off-canvas so any
+    // stale rect references read as out-of-bounds (the strip is also
+    // never drawn — see drawPanels).
+    const replayH = this.panelsHidden ? 0 : (compact ? 48 : 56);
     const replayMargin = Math.max(12, H * 0.016);
-    const replayY = H - replayH - replayMargin;
+    const replayY = this.panelsHidden ? H : H - replayH - replayMargin;
 
     // Bottom inspector lives between the side panels, just above the
     // replay strip. Floor bumped to 112 so the title bar (34) + count
@@ -859,7 +863,13 @@ export class CodeKingdomScene extends Phaser.Scene {
     // below the panel border at 1024×768.
     const bottomH = Math.min(compact ? 144 : 168, Math.max(132, H * 0.15));
     const replayGap = 12;
-    const bottomY = replayY - replayGap - bottomH;
+    // In focus mode the inspector hugs the bottom edge directly
+    // (replayMargin only) since the replay strip isn't there to sit
+    // above. Otherwise it floats above the replay strip with replayGap
+    // breathing room.
+    const bottomY = this.panelsHidden
+      ? H - bottomH - replayMargin
+      : replayY - replayGap - bottomH;
 
     const inspectorGutter = compact ? 20 : 32;
     const inspectorX = leftX + panelW + inspectorGutter;
@@ -868,7 +878,12 @@ export class CodeKingdomScene extends Phaser.Scene {
     // Ring well: between side panels horizontally, between ops strip
     // bottom and bottom-inspector top vertically (with gutters).
     const wellGutterX = compact ? 18 : 28;
-    const wellGutterY = compact ? 12 : 20;
+    // In focus mode the side panels are gone, so the only things bracketing
+    // the ring vertically are the topbar above and the inspector below.
+    // Tighten the gutters so the ring well grows ~24px vertically; that
+    // grows radiusY, spreads N/S buildings further from the castle, and
+    // also lifts the ring center up a touch (since wellTop moves up).
+    const wellGutterY = this.panelsHidden ? (compact ? 6 : 8) : (compact ? 12 : 20);
     const wellLeft = leftX + panelW + wellGutterX;
     const wellRight = rightX - wellGutterX;
     const wellTop = opsY + opsH + wellGutterY;
@@ -878,11 +893,10 @@ export class CodeKingdomScene extends Phaser.Scene {
     const wellH = Math.max(180, wellBottom - wellTop);
 
     const centerX = wellLeft + wellW / 2;
-    const centerY = wellTop + wellH / 2;
 
-    // District sprite half-size. For 7 evenly spaced points on an
+    // District sprite half-size. For 8 evenly spaced points on an
     // ellipse, the worst-case chord between adjacent districts is
-    // ~0.87 * min(rx, ry). District sprite must be smaller than that
+    // ~0.77 * min(rx, ry). District sprite must be smaller than that
     // chord to avoid neighbour collisions, so derive sprite size from
     // the smaller radius rather than from pure scene scale. In focus
     // mode we lift the absolute cap so the buildings can grow into
@@ -904,8 +918,31 @@ export class CodeKingdomScene extends Phaser.Scene {
     // grows the sprites.
     const labelStackH = Math.round(46 * (districtR / 64) + 14 + Math.max(14, districtR * 0.22) + Math.max(18, districtR * 0.26));
 
-    const radiusX = Math.max(120, rawRadiusX - districtR);
-    const radiusY = Math.max(100, rawRadiusY - Math.max(districtR, labelStackH));
+    // The top district (Edits) only needs `districtR` of clearance
+    // above its center, while the bottom district (Agents) needs
+    // `labelStackH` for its label stack. That asymmetry wastes vertical
+    // space when we use the smaller of the two for radiusY. Instead,
+    // shift the ring's geometric center UP by half the asymmetry so
+    // the top and bottom clearance requirements balance — radiusY can
+    // then grow to use the freed space. Focus mode only; panels-visible
+    // layout has been signed off and we don't disturb it.
+    const verticalShift = this.panelsHidden
+      ? Math.max(0, (labelStackH - districtR) / 2)
+      : 0;
+    const centerY = wellTop + wellH / 2 - verticalShift;
+
+    const radiusY = this.panelsHidden
+      ? Math.max(100, rawRadiusY - (labelStackH + districtR) / 2)
+      : Math.max(100, rawRadiusY - Math.max(districtR, labelStackH));
+
+    // In focus mode the well is much wider than tall (no side panels),
+    // so an unconstrained radiusX puts the side districts far from the
+    // castle and breaks the ring feel. Cap radiusX so the ellipse stays
+    // closer to a circle. 1.4:1 is the sweet spot — tighter (1.3)
+    // crowds the castle halo on smaller viewports, looser (1.5+) starts
+    // to look elongated on wide ones.
+    const radiusXCap = this.panelsHidden ? radiusY * 1.4 : Infinity;
+    const radiusX = Math.max(120, Math.min(rawRadiusX - districtR, radiusXCap));
     const topLift = Math.min(districtR * 0.6, Math.max(0, wellTop - opsY - opsH - districtR * 1.4));
 
     return {
@@ -1108,11 +1145,19 @@ export class CodeKingdomScene extends Phaser.Scene {
     const castleY = centerY + topLift * 0.5 + districtSize * 0.12;
     this.drawCastle(centerX, castleY, s);
 
+    // Find which district the inspector is currently showing so the
+    // thick "focused" bracket can track it. Live hover always wins;
+    // otherwise the sticky-last-hover key picks the survivor; if neither
+    // is set (first paint) nothing gets the focused styling.
+    const inspectedIdx = this.hoveredDistrictIndex >= 0
+      ? this.hoveredDistrictIndex
+      : (this.inspectedDistrictKey
+          ? this.districts.findIndex(d => d.key === this.inspectedDistrictKey)
+          : -1);
+
     for (let i = 0; i < this.districts.length; i++) {
       const district = this.districts[i];
-      const selected = i === this.selectedDistrict;
-      const hovered = i === this.hoveredDistrictIndex;
-      const focused = selected || hovered;
+      const focused = i === inspectedIdx;
       const size = districtSize;
       const panelTop = district.y - size / 2;
       // Extend the corner frame downward so the label + count sit cleanly
@@ -1408,7 +1453,16 @@ export class CodeKingdomScene extends Phaser.Scene {
 
     this.drawDistrictInspector(inspectorX, bottomY, inspectorW, bottomH);
 
-    this.drawReplayTimeline(leftX, replayY, W - leftX * 2, replayH);
+    // Replay strip is hidden in focus mode — drawReplayTimeline also
+    // populates the play/live/track rects that the click handler
+    // reads, so leave them null when skipped.
+    if (this.panelsHidden) {
+      this.replayPlayButtonRect = null;
+      this.replayLiveButtonRect = null;
+      this.replayTrackRect = null;
+    } else {
+      this.drawReplayTimeline(leftX, replayY, W - leftX * 2, replayH);
+    }
 
     // Transcript drill-down sits on top of everything so it can occlude
     // panels while the user reviews a session.
@@ -1760,9 +1814,9 @@ export class CodeKingdomScene extends Phaser.Scene {
 
   /// Sticky last-hover model: whatever the user most recently pointed
   /// at stays visible when the pointer moves away. Currently hovered
-  /// district always wins (immediate response), `inspectedDistrictKey`
-  /// is the persisted last-hover, and `selectedDistrict` is the
-  /// keyboard-nav fallback.
+  /// district always wins (immediate response); `inspectedDistrictKey`
+  /// is the persisted last-hover. Before the first hover we fall back
+  /// to the first district so the inspector has something to show.
   private activeInspectedDistrict(): District | undefined {
     const hovered = this.districts[this.hoveredDistrictIndex];
     if (hovered) return hovered;
@@ -1770,7 +1824,7 @@ export class CodeKingdomScene extends Phaser.Scene {
       const last = this.districts.find(d => d.key === this.inspectedDistrictKey);
       if (last) return last;
     }
-    return this.districts[this.selectedDistrict];
+    return this.districts[0];
   }
 
   /// Aggregate live stats for the district inspector: top tool, total

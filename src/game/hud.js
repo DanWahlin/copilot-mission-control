@@ -162,23 +162,23 @@
   var panelsBtn = $('panels-btn');
   var panelsHidden = safeGet('koa_panels_hidden') === '1';
 
-  // Two-state icon: inward chevrons (`>|<`) when panels are visible
-  // (clicking will hide them = pinch toward center), outward chevrons
-  // (`<|>`) when panels are hidden (clicking will restore them = push
-  // back out). The fixed vertical bars on both edges represent the
-  // window/canvas boundary; the chevrons show the direction of motion.
-  var ICON_HIDE = '<svg viewBox="0 0 16 16" aria-hidden="true">'
-    + '<path d="M2 3v10M14 3v10"/>'
-    + '<path d="M5 4l3 4-3 4M11 4l-3 4 3 4"/>'
+  // Two-state icon: open eye = panels currently visible (click hides
+  // them); eye with a diagonal slash = panels currently hidden (click
+  // restores them). Matches the standard password-toggle convention so
+  // the icon reads as the *current state*, not the action that will fire.
+  var ICON_EYE_OPEN = '<svg viewBox="0 0 16 16" aria-hidden="true">'
+    + '<path d="M1.5 8 Q 8 2.5 14.5 8 Q 8 13.5 1.5 8 Z"/>'
+    + '<circle cx="8" cy="8" r="2"/>'
     + '</svg>';
-  var ICON_SHOW = '<svg viewBox="0 0 16 16" aria-hidden="true">'
-    + '<path d="M2 3v10M14 3v10"/>'
-    + '<path d="M8 4l-3 4 3 4M8 4l3 4-3 4"/>'
+  var ICON_EYE_SLASH = '<svg viewBox="0 0 16 16" aria-hidden="true">'
+    + '<path d="M1.5 8 Q 8 2.5 14.5 8 Q 8 13.5 1.5 8 Z"/>'
+    + '<circle cx="8" cy="8" r="2"/>'
+    + '<path d="M2.5 13.5 L 13.5 2.5"/>'
     + '</svg>';
 
   function applyPanelsState() {
     if (panelsBtn) {
-      panelsBtn.innerHTML = panelsHidden ? ICON_SHOW : ICON_HIDE;
+      panelsBtn.innerHTML = panelsHidden ? ICON_EYE_SLASH : ICON_EYE_OPEN;
       panelsBtn.title = panelsHidden
         ? 'Show side panels'
         : 'Hide side panels for focus mode';
