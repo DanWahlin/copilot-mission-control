@@ -104,3 +104,5 @@ const H = 900;
 
 await snap({ width: W, height: H, panelsHidden: false, out: 'docs/img/dashboard.png' });
 await snap({ width: W, height: H, panelsHidden: true,  out: 'docs/img/focus-mode.png' });
+await snap({ width: 1600, height: 900, panelsHidden: false, out: 'docs/img/dashboard-wide.png' });
+await snap({ width: 1280, height: 800, panelsHidden: true,  out: 'docs/img/focus-mode-compact.png' });

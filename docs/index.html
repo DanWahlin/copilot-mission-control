@@ -1,46 +1,314 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Kingdom of Agents — Live dashboard for GitHub Copilot CLI</title>
-  <meta name="description" content="Kingdom of Agents is a windowed, medieval-themed dashboard that turns your live GitHub Copilot CLI activity into a living kingdom of tools, agents, and alerts.">
-  <link rel="stylesheet" href="style.css">
+  <meta name="description" content="A medieval-themed desktop dashboard that turns live GitHub Copilot CLI activity into a kingdom of districts. Built with Tauri, Phaser, and TypeScript." />
+  <meta property="og:title" content="Kingdom of Agents" />
+  <meta property="og:description" content="Watch your live GitHub Copilot CLI activity become a living kingdom of tools, agents, and alerts." />
+  <meta property="og:image" content="img/dashboard.png" />
+  <link rel="icon" href="img/icon.png" type="image/png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;600;700;800;900&family=Exo+2:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <main class="hero">
-    <h1><span class="crown">🏰</span> Kingdom of Agents</h1>
-    <p class="tagline">A live, medieval-themed dashboard for the GitHub Copilot CLI.</p>
-    <p class="body">
-      Watch your active Copilot CLI sessions become a living kingdom of districts —
-      forge, library, terminal keep, signal tower, guild hall, tome hall, envoy house, and royal court —
-      with tool calls, agent delegations, errors, and alerts surfaced in real time.
-    </p>
 
-    <div class="cta">
-      <a class="primary" href="https://github.com/DanWahlin/kingdom-of-agents/releases">Download latest release</a>
-      <a class="secondary" href="https://github.com/DanWahlin/kingdom-of-agents">View on GitHub</a>
+  <canvas id="starfield"></canvas>
+  <div id="particles"></div>
+  <div class="scanlines"></div>
+
+  <nav class="navbar" id="navbar">
+    <div class="navbar-inner">
+      <a href="#" class="navbar-brand">🏰 Kingdom of Agents</a>
+      <button class="navbar-toggle" id="navbar-toggle" aria-label="Toggle menu">
+        <span></span><span></span><span></span>
+      </button>
+      <ul class="navbar-links" id="navbar-links">
+        <li><a href="#districts">Districts</a></li>
+        <li><a href="#how">How It Works</a></li>
+        <li><a href="#story">Story</a></li>
+        <li><a href="#shortcuts">Shortcuts</a></li>
+        <li><a href="#credits">Credits</a></li>
+        <li><a href="https://github.com/DanWahlin/kingdom-of-agents/releases" class="btn btn-primary btn-nav">Download</a></li>
+        <li><a href="https://github.com/DanWahlin/kingdom-of-agents" target="_blank" class="navbar-github" aria-label="GitHub"><svg viewBox="0 0 16 16" width="22" height="22" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg></a></li>
+      </ul>
     </div>
+  </nav>
 
-    <figure class="shot">
-      <img src="img/dashboard.png" alt="Kingdom of Agents dashboard with the kingdom ring, summary panel, session inspector, and replay timeline">
-      <figcaption>Full dashboard — kingdom ring, live summary, session inspector, and replay timeline.</figcaption>
-    </figure>
+  <header class="hero">
+    <div class="hero-glow"></div>
 
-    <figure class="shot">
-      <img src="img/focus-mode.png" alt="Focus mode hides the side panels so the kingdom dominates the window">
-      <figcaption>Focus mode — hide the side panels and let the kingdom dominate your second monitor.</figcaption>
-    </figure>
+    <div class="container hero-grid">
+      <div class="hero-copy">
+        <div class="hero-kicker"><span class="kicker-dot"></span> Live Copilot CLI dashboard</div>
+        <h1 class="hero-title">Watch your <span class="highlight">Copilot kingdom</span><br/>come alive</h1>
+        <p class="hero-desc">A windowed, medieval-themed desktop app that turns active GitHub Copilot CLI sessions into a living kingdom of districts — forge, library, terminal keep, and more — with tool calls, agents, and alerts surfaced in real time.</p>
 
-    <section class="status">
-      <h2>Status</h2>
-      <p>
-        Kingdom of Agents is early (v0.1.0). Builds for macOS, Windows, and Linux are produced from the
-        <code>v*</code> tag pipeline and attached to each
-        <a href="https://github.com/DanWahlin/kingdom-of-agents/releases">GitHub Release</a>.
-      </p>
-    </section>
-  </main>
+        <div class="hero-cta">
+          <a href="https://github.com/DanWahlin/kingdom-of-agents/releases" class="btn btn-primary btn-glow">
+            <span class="btn-icon">⬇</span> Download Now
+          </a>
+          <a href="https://github.com/DanWahlin/kingdom-of-agents" target="_blank" class="btn btn-secondary">
+            <span class="btn-icon">⌥</span> View on GitHub
+          </a>
+        </div>
+
+        <div class="built-with">
+          <span class="built-with-icon">⚡</span>
+          Built for the <a href="https://github.com/github/copilot-cli" target="_blank">GitHub Copilot CLI</a>
+          <span class="built-with-separator">·</span>
+          <a href="https://github.com/github/copilot-cli-for-beginners" target="_blank">Free course →</a>
+        </div>
+
+        <div class="hero-badges">
+          <span class="badge">Tauri 2</span>
+          <span class="badge">Phaser 4</span>
+          <span class="badge">Rust + TypeScript</span>
+          <span class="badge">Mac · Win · Linux</span>
+        </div>
+      </div>
+
+      <div class="hero-stage">
+        <div class="gif-showcase">
+          <div class="gif-frame">
+            <div class="gif-toolbar">
+              <div class="traffic-lights"><span></span><span></span><span></span></div>
+              <span class="gif-game-label" id="gif-label">Loading…</span>
+            </div>
+            <div class="gif-viewport">
+              <img id="gif-display" src="" alt="Dashboard preview" class="gif-img" />
+            </div>
+          </div>
+          <div class="gif-indicators" id="gif-indicators"></div>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <div class="lightbox" id="lightbox">
+    <button class="lightbox-close" aria-label="Close">&times;</button>
+    <img id="lightbox-img" src="" alt="Full-size preview" />
+    <span class="lightbox-label" id="lightbox-label"></span>
+  </div>
+
+  <section class="section districts" id="districts">
+    <div class="container">
+      <h2 class="section-title"><span class="title-icon">🏰</span> The Kingdom</h2>
+      <p class="section-lede">Each Copilot tool category becomes a district in the ring around your central castle. Buildings light up as work flows through them.</p>
+      <div class="games-grid">
+        <div class="game-card forge">
+          <div class="game-card-glow"></div>
+          <div class="game-card-content">
+            <div class="game-header">
+              <div class="game-icon-emoji">⚒️</div>
+              <h3>Forge</h3>
+            </div>
+            <p>File writes and <code>apply_patch</code> calls. The forge fires brightest when edits are flying.</p>
+            <div class="district-tools"><span class="tool-tag">apply_patch</span><span class="tool-tag">write</span></div>
+          </div>
+        </div>
+
+        <div class="game-card library">
+          <div class="game-card-glow"></div>
+          <div class="game-card-content">
+            <div class="game-header">
+              <div class="game-icon-emoji">📚</div>
+              <h3>Library</h3>
+            </div>
+            <p>Reads, search, and code navigation. Usually the busiest district in any session.</p>
+            <div class="district-tools"><span class="tool-tag">view</span><span class="tool-tag">rg</span><span class="tool-tag">grep</span></div>
+          </div>
+        </div>
+
+        <div class="game-card terminal">
+          <div class="game-card-glow"></div>
+          <div class="game-card-content">
+            <div class="game-header">
+              <div class="game-icon-emoji">⚙️</div>
+              <h3>Terminal Keep</h3>
+            </div>
+            <p>Shell commands the agent runs — builds, tests, lints, anything that touches a process.</p>
+            <div class="district-tools"><span class="tool-tag">bash</span><span class="tool-tag">shell</span></div>
+          </div>
+        </div>
+
+        <div class="game-card signal">
+          <div class="game-card-glow"></div>
+          <div class="game-card-content">
+            <div class="game-header">
+              <div class="game-icon-emoji">📡</div>
+              <h3>Signal Tower</h3>
+            </div>
+            <p>External lookups — web fetches, docs research, anything reaching beyond your machine.</p>
+            <div class="district-tools"><span class="tool-tag">web_fetch</span><span class="tool-tag">web_search</span></div>
+          </div>
+        </div>
+
+        <div class="game-card guild">
+          <div class="game-card-glow"></div>
+          <div class="game-card-content">
+            <div class="game-header">
+              <div class="game-icon-emoji">🛡️</div>
+              <h3>Guild Hall</h3>
+            </div>
+            <p>Sub-agent delegations. Watch the main agent dispatch specialized workers.</p>
+            <div class="district-tools"><span class="tool-tag">task</span><span class="tool-tag">agent</span></div>
+          </div>
+        </div>
+
+        <div class="game-card tome">
+          <div class="game-card-glow"></div>
+          <div class="game-card-content">
+            <div class="game-header">
+              <div class="game-icon-emoji">📖</div>
+              <h3>Tome Hall</h3>
+            </div>
+            <p>Skill invocations — the agent pulling in pre-built playbooks for specialized work.</p>
+            <div class="district-tools"><span class="tool-tag">skill</span></div>
+          </div>
+        </div>
+
+        <div class="game-card envoy">
+          <div class="game-card-glow"></div>
+          <div class="game-card-content">
+            <div class="game-header">
+              <div class="game-icon-emoji">🪶</div>
+              <h3>Envoy House</h3>
+            </div>
+            <p>MCP tool calls — external servers extending the agent's capabilities.</p>
+            <div class="district-tools"><span class="tool-tag">mcp.*</span></div>
+          </div>
+        </div>
+
+        <div class="game-card court">
+          <div class="game-card-glow"></div>
+          <div class="game-card-content">
+            <div class="game-header">
+              <div class="game-icon-emoji">👑</div>
+              <h3>Royal Court</h3>
+            </div>
+            <p>Permission prompts and alerts. When the court summons you, the agent needs a decision.</p>
+            <div class="district-tools"><span class="tool-tag">prompt</span><span class="tool-tag">alert</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section how-it-works" id="how">
+    <div class="container">
+      <h2 class="section-title"><span class="title-icon">⚡</span> How It Works</h2>
+      <div class="steps">
+        <div class="step">
+          <div class="step-number">01</div>
+          <div class="step-content">
+            <h3>Launch the app</h3>
+            <p>Download a release for macOS, Windows, or Linux. Open it once and the window remembers its size and position for next time. No setup, no accounts.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-number">02</div>
+          <div class="step-content">
+            <h3>Run Copilot CLI in your terminal</h3>
+            <p>Use Copilot CLI like you normally would. Kingdom of Agents reads the session state Copilot already writes under <code>~/.copilot/session-state/</code> — there's no extra config.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-number">03</div>
+          <div class="step-content">
+            <h3>Watch the kingdom react</h3>
+            <p>Tool calls light up districts within ~300 ms of happening. Use the replay scrubber to rewind. Click the 👁 button to hide the side panels and put the kingdom front-and-center on a second monitor.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section story" id="story">
+    <div class="container">
+      <h2 class="section-title"><span class="title-icon">🛠️</span> How This Was Made</h2>
+      <div class="story-card">
+        <div class="story-text">
+          <p><strong>Built with <a href="https://github.com/github/copilot-cli" target="_blank">GitHub Copilot CLI</a></strong>, which scaffolded the Tauri 2 + Phaser 4 + TypeScript shell and then iteratively designed the kingdom layout, the privacy-safe <code>AgentProvider</code> trait, and the replay timeline.</p>
+          <p>The architecture is deliberately provider-agnostic — <code>CopilotProvider</code> is the only implementation shipping today, but adding Claude Code, Codex, or other CLIs is a matter of dropping in another provider behind the same allowlisted boundary. Raw prompts, tool arguments, command output, file paths, and diffs <strong>never</strong> leave the Rust backend.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section controls" id="shortcuts">
+    <div class="container">
+      <h2 class="section-title"><span class="title-icon">🎯</span> Shortcuts</h2>
+      <div class="controls-grid">
+        <div class="control-card general">
+          <h3>⌨️ Keyboard &amp; Topbar</h3>
+          <table>
+            <tbody>
+              <tr><td><kbd>M</kbd></td><td>Toggle mute</td></tr>
+              <tr><td>👁 button</td><td>Hide / show side panels (focus mode)</td></tr>
+              <tr><td>🌙 / ☀️ button</td><td>Toggle dark / light theme</td></tr>
+              <tr><td>Click district</td><td>Pin it in the session inspector</td></tr>
+              <tr><td>Drag replay scrubber</td><td>Rewind the event timeline</td></tr>
+              <tr><td>Tray icon</td><td>Show / hide window, quit</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section credits" id="credits">
+    <div class="container">
+      <h2 class="section-title"><span class="title-icon">🙏</span> Credits</h2>
+      <div class="credits-grid">
+        <div class="credit-item">
+          <div class="credit-icon">🏰</div>
+          <h4>Tiny Swords (CC0)</h4>
+          <p><a href="https://pixelfrog-assets.itch.io/tiny-swords" target="_blank">Tiny Swords</a> by Pixel Frog — the pixel-art castles and buildings powering the kingdom.</p>
+        </div>
+        <div class="credit-item">
+          <div class="credit-icon">🦀</div>
+          <h4>Tauri 2</h4>
+          <p><a href="https://v2.tauri.app/" target="_blank">Tauri 2</a> — the Rust-backed desktop shell.</p>
+        </div>
+        <div class="credit-item">
+          <div class="credit-icon">🎮</div>
+          <h4>Phaser 4</h4>
+          <p><a href="https://phaser.io/" target="_blank">Phaser 4</a> — the WebGL scene that draws the kingdom.</p>
+        </div>
+        <div class="credit-item">
+          <div class="credit-icon">🤖</div>
+          <h4>Copilot CLI</h4>
+          <p><a href="https://github.com/github/copilot-cli" target="_blank">GitHub Copilot CLI</a> — the source of every event the kingdom visualizes.</p>
+        </div>
+        <div class="credit-item">
+          <div class="credit-icon">📚</div>
+          <h4>Free Course</h4>
+          <p><a href="https://github.com/github/copilot-cli-for-beginners" target="_blank">Copilot CLI for Beginners</a> — learn the CLI this dashboard visualizes.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-content">
+        <p class="footer-title">Kingdom of Agents</p>
+        <p class="footer-sub">Built by Dan Wahlin using <a href="https://github.com/github/copilot-cli" target="_blank">GitHub Copilot CLI</a></p>
+        <div class="footer-links">
+          <a href="https://github.com/DanWahlin/kingdom-of-agents" target="_blank">GitHub</a>
+          <a href="https://github.com/DanWahlin/kingdom-of-agents/releases" target="_blank">Releases</a>
+        </div>
+        <p class="footer-copy">MIT licensed · Tiny Swords assets CC0 from Pixel Frog</p>
+      </div>
+    </div>
+  </footer>
+
+  <script src="script.js"></script>
 </body>
 </html>
+
 
