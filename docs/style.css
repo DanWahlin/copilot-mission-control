@@ -294,6 +294,7 @@ code {
 .highlight {
   color: var(--gold);
   font-weight: 800;
+  white-space: nowrap;
 }
 
 .hero-desc {
@@ -691,18 +692,6 @@ code {
   color: var(--teal);
 }
 
-kbd {
-  display: inline-block;
-  padding: 3px 8px;
-  font-family: var(--font-mono);
-  font-size: 0.78rem;
-  background: rgba(255,255,255,0.07);
-  border: 1px solid rgba(255,255,255,0.12);
-  border-radius: 5px;
-  color: var(--cyan);
-  white-space: nowrap;
-}
-
 /* ---------- Steps ---------- */
 .steps {
   display: flex;
@@ -793,37 +782,6 @@ kbd {
 
 .story-text p:last-child { margin-bottom: 0; }
 .story-text strong { color: var(--white); }
-
-/* ---------- Shortcuts ---------- */
-.controls-grid { max-width: 600px; margin: 0 auto; }
-
-.control-card {
-  background: var(--bg-card);
-  border-radius: var(--radius-lg);
-  border: 1px solid var(--border);
-  padding: 32px;
-  text-align: center;
-}
-
-.control-card h3 {
-  font-family: var(--font-display);
-  font-size: 1.1rem;
-  margin-bottom: 20px;
-  color: var(--white);
-}
-
-.control-card table { width: 100%; border-collapse: collapse; }
-
-.control-card td {
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--border);
-  font-size: 1rem;
-  color: var(--white);
-}
-
-.control-card tr:last-child td { border-bottom: none; }
-.control-card td:first-child { text-align: right; width: 45%; }
-.control-card td:last-child { text-align: left; color: var(--white-dim); }
 
 /* ---------- Credits ---------- */
 .credits-grid {
@@ -942,8 +900,6 @@ kbd {
   .credit-item { padding: 18px 14px; }
   .credit-item h4 { font-size: 0.8rem; }
   .credit-item p { font-size: 0.82rem; }
-  .control-card { padding: 24px 16px; }
-  .control-card td { padding: 8px 10px; font-size: 0.9rem; }
   .footer { padding: 40px 0 30px; }
   .footer-links { gap: 16px; flex-wrap: wrap; }
   .gif-showcase { max-width: 360px; }
@@ -970,9 +926,6 @@ kbd {
   .steps::before { left: 23px; }
   .story-card { padding: 20px 16px; }
   .story-text p { font-size: 0.92rem; }
-  .controls-grid { max-width: 100%; }
-  .control-card td { padding: 8px 6px; font-size: 0.85rem; }
-  kbd { font-size: 0.72rem; padding: 2px 6px; }
   .credits-grid { grid-template-columns: repeat(2, 1fr); gap: 12px; }
   .credit-icon { font-size: 1.5rem; margin-bottom: 8px; }
   .footer-title { font-size: 1.1rem; }

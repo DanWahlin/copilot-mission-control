@@ -30,7 +30,6 @@
         <li><a href="#districts">Districts</a></li>
         <li><a href="#how">How It Works</a></li>
         <li><a href="#story">Story</a></li>
-        <li><a href="#shortcuts">Shortcuts</a></li>
         <li><a href="#credits">Credits</a></li>
         <li><a href="https://github.com/DanWahlin/kingdom-of-agents/releases" class="btn btn-primary btn-nav">Download</a></li>
         <li><a href="https://github.com/DanWahlin/kingdom-of-agents" target="_blank" class="navbar-github" aria-label="GitHub"><svg viewBox="0 0 16 16" width="22" height="22" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg></a></li>
@@ -234,27 +233,6 @@
         <div class="story-text">
           <p><strong>Built with <a href="https://github.com/github/copilot-cli" target="_blank">GitHub Copilot CLI</a></strong>, which scaffolded the Tauri 2 + Phaser 4 + TypeScript shell and then iteratively designed the kingdom layout, the privacy-safe <code>AgentProvider</code> trait, and the replay timeline.</p>
           <p>The architecture is deliberately provider-agnostic — <code>CopilotProvider</code> is the only implementation shipping today, but adding Claude Code, Codex, or other CLIs is a matter of dropping in another provider behind the same allowlisted boundary. Raw prompts, tool arguments, command output, file paths, and diffs <strong>never</strong> leave the Rust backend.</p>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <section class="section controls" id="shortcuts">
-    <div class="container">
-      <h2 class="section-title"><span class="title-icon">🎯</span> Shortcuts</h2>
-      <div class="controls-grid">
-        <div class="control-card general">
-          <h3>⌨️ Keyboard &amp; Topbar</h3>
-          <table>
-            <tbody>
-              <tr><td><kbd>M</kbd></td><td>Toggle mute</td></tr>
-              <tr><td>👁 button</td><td>Hide / show side panels (focus mode)</td></tr>
-              <tr><td>🌙 / ☀️ button</td><td>Toggle dark / light theme</td></tr>
-              <tr><td>Click district</td><td>Pin it in the session inspector</td></tr>
-              <tr><td>Drag replay scrubber</td><td>Rewind the event timeline</td></tr>
-              <tr><td>Tray icon</td><td>Show / hide window, quit</td></tr>
-            </tbody>
-          </table>
         </div>
       </div>
     </div>
