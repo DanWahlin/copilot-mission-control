@@ -972,7 +972,7 @@ export class CodeKingdomScene extends Phaser.Scene {
       { key: 'library', label: 'Library', short: 'Reads' },
       { key: 'terminal', label: 'Terminal Keep', short: 'Commands' },
       { key: 'signal', label: 'Signal Tower', short: 'Web/Docs' },
-      { key: 'delegates', label: 'Guild Hall', short: 'Agents' },
+      { key: 'delegates', label: 'Guild Hall', short: 'Sub-Agents' },
       { key: 'skills', label: 'Tome Hall', short: 'Skills' },
       { key: 'court', label: 'Royal Court', short: 'Intent' },
       { key: 'mcp', label: 'Envoy House', short: 'MCP' },
