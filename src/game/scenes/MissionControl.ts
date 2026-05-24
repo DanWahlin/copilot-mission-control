@@ -1695,7 +1695,7 @@ export class MissionControlScene extends Phaser.Scene {
     // `compactNumberShort` ("184k" vs "184.0k") keeps the single-line
     // string short enough to fit the right-panel inner width even at
     // the 1600×1000 default.
-    const tokensLine = `Tokens in ${compactNumberShort(inTok)} / Tokens out ${compactNumberShort(outTok)}`;
+    const tokensLine = `Tokens in/out: ${compactNumberShort(inTok)}/${compactNumberShort(outTok)}`;
     // CSS-grid-style row layout for the details block. Each row is
     // centered via setOrigin(0, 0.5) at a uniform pitch. The buttons
     // anchor to `actionsY = y + h - btnH - 16` (computed below), so
