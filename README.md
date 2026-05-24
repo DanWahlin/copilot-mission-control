@@ -23,9 +23,9 @@ Copilot Mission Control reads the local session state Copilot CLI already writes
 | **Envoy House** (MCP) | MCP tool calls |
 | **Royal Court** (Intent) | Permission prompts and alerts |
 
-The dashboard panels on the left and right give you a live summary, the running session, and recent activity. A replay scrubber across the bottom lets you rewind the event timeline.
+The dashboard panels on the left and right give you a live summary, the running session, and recent activity. A replay scrubber across the bottom lets you rewind the event timeline. Open the selected-session inspector to filter recent calls by MCP, skills, sub-agents, or failures, then switch to the turn story to see what happened turn-by-turn.
 
-Only sanitized session summaries cross the renderer bridge — prompts, tool arguments, command output, file paths, and diffs **never** leave the Rust backend.
+Only sanitized session summaries cross the renderer bridge — prompts, raw tool arguments, command output, file paths, and diffs **never** leave the Rust backend.
 
 ### Focus mode
 
@@ -92,4 +92,3 @@ Outputs `docs/img/dashboard.gif`, `docs/img/focus-mode.gif`, and a `docs/img/das
 ## License
 
 MIT [`LICENSE`](./LICENSE).
-

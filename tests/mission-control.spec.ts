@@ -100,8 +100,133 @@ async function getMissionState(page: Page) {
       })),
       inspectedQuarterKey: scene.inspectedQuarterKey ?? null,
       hoveredQuarterIndex: scene.hoveredQuarterIndex ?? -1,
+      transcriptOpen: scene.transcriptOpen ?? false,
+      transcriptToggle: scene.transcriptToggleRect ?? null,
+      transcriptClose: scene.transcriptCloseRect ?? null,
+      inspectorState: scene.inspectorState ?? null,
+      inspectorModeRects: scene.inspectorModeRects ?? [],
+      inspectorTabRects: scene.inspectorTabRects ?? [],
+      inspectorRowRects: scene.inspectorRowRects ?? [],
+      transcriptScrollThumb: scene.transcriptScrollThumbRect ?? null,
+      transcriptScrollTrack: scene.transcriptScrollTrackRect ?? null,
+      inspectorTexts: (scene.transcriptTextObjects ?? []).map((obj: any) => obj.text),
     };
   });
+}
+
+function inspectorFixture() {
+  const fixture = JSON.parse(JSON.stringify(MISSION_FIXTURE));
+  const beta = fixture.sessions.find((session: any) => session.id === 'beta4567');
+  beta.recent_tool_calls = [
+    {
+      tool: 'browser_navigate',
+      category: 'mcp',
+      timestamp: '2026-05-21T07:10:00Z',
+      completed_at: '2026-05-21T07:10:01Z',
+      success: true,
+      duration_ms: 1000,
+      model: 'gpt-5.5',
+      call_id: 'call-mcp1',
+      turn_id: 'turn-a1',
+      target: 'browser_navigate',
+      details: [
+        { label: 'Type', value: 'MCP tool' },
+        { label: 'Provider', value: 'copilot' },
+        { label: 'Privacy', value: 'arguments/output hidden' },
+      ],
+      raw_args: 'SECRET_MCP /Users/dan/.env',
+    },
+    {
+      tool: 'blog-writer',
+      category: 'skills',
+      timestamp: '2026-05-21T07:11:00Z',
+      completed_at: '2026-05-21T07:11:02Z',
+      success: true,
+      duration_ms: 2000,
+      model: 'gpt-5.5',
+      call_id: 'call-skill1',
+      turn_id: 'turn-a1',
+      target: 'blog-writer',
+      details: [
+        { label: 'Type', value: 'Skill' },
+        { label: 'Provider', value: 'copilot' },
+        { label: 'Privacy', value: 'arguments/output hidden' },
+      ],
+      prompt: 'SECRET_SKILL',
+    },
+    {
+      tool: 'code-reviewer',
+      category: 'delegates',
+      timestamp: '2026-05-21T07:12:00Z',
+      completed_at: '2026-05-21T07:12:04Z',
+      success: false,
+      duration_ms: 4000,
+      model: 'gpt-5.5',
+      call_id: 'call-agent1',
+      turn_id: 'turn-a1',
+      target: 'code-reviewer',
+      details: [
+        { label: 'Type', value: 'Sub-agent' },
+        { label: 'Provider', value: 'copilot' },
+        { label: 'Privacy', value: 'arguments/output hidden' },
+        { label: 'Mode', value: 'background' },
+      ],
+      command: 'SECRET_AGENT',
+    },
+  ];
+  beta.recent_turns = [
+    {
+      id: 'turn-a1',
+      started_at: '2026-05-21T07:09:30Z',
+      ended_at: '2026-05-21T07:12:10Z',
+      status: 'failed',
+      tool_count: 3,
+      tools: ['browser_navigate', 'blog-writer', 'code-reviewer'],
+      failure_count: 1,
+      categories: ['delegates', 'mcp', 'skills'],
+      model: 'gpt-5.5',
+      output_tokens: 3210,
+      partial: false,
+      duration_ms: 160000,
+    },
+    {
+      id: 'turn-tail',
+      started_at: '2026-05-21T07:13:00Z',
+      ended_at: '',
+      status: 'running',
+      tool_count: 1,
+      tools: ['bash'],
+      failure_count: 0,
+      categories: ['terminal'],
+      model: 'gpt-5.5',
+      output_tokens: 0,
+      partial: true,
+    },
+  ];
+  return fixture;
+}
+
+function overflowingInspectorFixture() {
+  const fixture = inspectorFixture();
+  const beta = fixture.sessions.find((session: any) => session.id === 'beta4567');
+  beta.recent_tool_calls = Array.from({ length: 36 }, (_, index) => ({
+    tool: `tool-${String(index + 1).padStart(2, '0')}`,
+    category: index % 3 === 0 ? 'mcp' : index % 3 === 1 ? 'skills' : 'delegates',
+    timestamp: new Date(Date.parse('2026-05-21T07:00:00Z') + index * 1000).toISOString(),
+    completed_at: new Date(Date.parse('2026-05-21T07:00:00Z') + index * 1000 + 500).toISOString(),
+    success: index % 7 !== 0,
+    duration_ms: 500,
+    model: 'gpt-5.5',
+    call_id: `call-overflow-${index + 1}`,
+    turn_id: 'turn-a1',
+    target: `tool-${index + 1}`,
+    details: [
+      { label: 'Type', value: index % 3 === 0 ? 'MCP tool' : index % 3 === 1 ? 'Skill' : 'Sub-agent' },
+      { label: 'Provider', value: 'copilot' },
+      { label: 'Privacy', value: 'arguments/output hidden' },
+    ],
+  }));
+  return fixture;
 }
 
 test.describe('Copilot Mission Control — Startup', () => {
@@ -198,23 +323,17 @@ test.describe('Copilot Mission Control — Dashboard', () => {
     expect(state!.replayState.cursor).toBe(4);
     expect(state!.replayState.atLive).toBe(true);
     expect(state!.replayState.paused).toBe(false);
-    expect(state!.replayPlayButton).toBeTruthy();
-    expect(state!.replayTrack).toBeTruthy();
+    await expect(page.locator('#dom-replay [data-cmc-action="replay-toggle"]')).toBeVisible();
+    await expect(page.locator('#dom-replay [data-cmc-action="replay-seek"]')).toBeVisible();
   });
 
   test('clicking pause freezes replay; clicking live resumes', async ({ page }) => {
-    const before = await getMissionState(page);
-    const playBtn = before!.replayPlayButton;
-    expect(playBtn).toBeTruthy();
-    const off = await canvasOffset(page);
-    await page.mouse.click(off.x + playBtn.x + playBtn.w / 2, off.y + playBtn.y + playBtn.h / 2);
+    await page.locator('#dom-replay [data-cmc-action="replay-toggle"]').click();
     await page.waitForTimeout(120);
     let state = await getMissionState(page);
     expect(state!.replayState.paused).toBe(true);
 
-    const liveBtn = state!.replayLiveButton;
-    expect(liveBtn).toBeTruthy();
-    await page.mouse.click(off.x + liveBtn.x + liveBtn.w / 2, off.y + liveBtn.y + liveBtn.h / 2);
+    await page.locator('#dom-replay [data-cmc-action="replay-live"]').click();
     await page.waitForTimeout(120);
     state = await getMissionState(page);
     expect(state!.replayState.paused).toBe(false);
@@ -224,10 +343,10 @@ test.describe('Copilot Mission Control — Dashboard', () => {
   test('clicking the timeline scrubs the cursor backward', async ({ page }) => {
     const before = await getMissionState(page);
     expect(before!.replayState.total).toBe(4);
-    const track = before!.replayTrack;
-    expect(track).toBeTruthy();
-    const off = await canvasOffset(page);
-    await page.mouse.click(off.x + track.x + track.w * 0.25, off.y + track.y + track.h / 2);
+    const track = page.locator('#dom-replay [data-cmc-action="replay-seek"]');
+    const box = await track.boundingBox();
+    expect(box).toBeTruthy();
+    await page.mouse.click(box!.x + box!.width * 0.25, box!.y + box!.height / 2);
     await page.waitForTimeout(120);
     const after = await getMissionState(page);
     expect(after!.replayState.cursor).toBeLessThan(before!.replayState.cursor);
@@ -237,15 +356,97 @@ test.describe('Copilot Mission Control — Dashboard', () => {
   test('clicking a running session selects it for inspection', async ({ page }) => {
     const before = await getMissionState(page);
     expect(before!.selectedSessionId).toBe('beta4567');
-    const alphaRow = before!.sessionPickerRows.find((row: any) => row.id === 'alpha123');
-    expect(alphaRow).toBeTruthy();
-
-    const off = await canvasOffset(page);
-    await page.mouse.click(off.x + alphaRow.x + alphaRow.w / 2, off.y + alphaRow.y + alphaRow.h / 2);
+    await page.locator('#dom-session [data-session-id="alpha123"]').click();
     await page.waitForTimeout(150);
 
     const after = await getMissionState(page);
     expect(after!.selectedSessionId).toBe('alpha123');
+  });
+
+  test('inspector filters MCP, skills, and sub-agent calls with safe details', async ({ page }) => {
+    await page.addInitScript((fixture) => { (window as any).__missionControlFixture = fixture; }, inspectorFixture());
+    await page.goto(GAME_URL);
+    await waitForGame(page);
+
+    const state = await getMissionState(page);
+    expect(state!.selectedSessionId).toBe('beta4567');
+    await page.locator('#dom-session [data-cmc-action="inspector"]').click();
+    await expect(page.locator('#inspector-overlay')).toHaveClass(/visible/);
+    await expect(page.locator('#inspector-title')).toContainText('Review Tests');
+
+    let text = await page.locator('#inspector-dialog').innerText();
+    expect(text).toContain('Safe details');
+    expect(text).toContain('code-reviewer');
+    expect(text).toContain('Sub-agent');
+    expect(text).toContain('arguments/output hidden');
+    expect(text).not.toContain('SECRET_AGENT');
+    expect(text).not.toContain('SECRET_MCP');
+    expect(text).not.toContain('/Users/dan/.env');
+
+    await page.locator('[data-inspector-tab="mcp"]').click();
+    text = await page.locator('#inspector-dialog').innerText();
+    expect(text).toContain('browser_navigate');
+    expect(text).toContain('MCP tool');
+    expect(text).not.toContain('SECRET_MCP');
+
+    await page.locator('[data-inspector-tab="skills"]').click();
+    text = await page.locator('#inspector-dialog').innerText();
+    expect(text).toContain('blog-writer');
+    expect(text).toContain('Skill');
+    expect(text).not.toContain('SECRET_SKILL');
+
+    await page.keyboard.press('Escape');
+    await expect(page.locator('#inspector-overlay')).not.toHaveClass(/visible/);
+  });
+
+  test('inspector turn mode shows turn-by-turn story and related tools', async ({ page }) => {
+    await page.addInitScript((fixture) => { (window as any).__missionControlFixture = fixture; }, inspectorFixture());
+    await page.goto(GAME_URL);
+    await waitForGame(page);
+
+    await page.locator('#dom-session [data-cmc-action="inspector"]').click();
+    await expect(page.locator('#inspector-overlay')).toHaveClass(/visible/);
+    await page.locator('[data-inspector-mode="turns"]').click();
+    await page.locator('[data-turn-id="turn-a1"]').click();
+
+    let text = await page.locator('#inspector-dialog').innerText();
+    expect(text).toContain('Turn story');
+    expect(text).toContain('failed');
+    expect(text).toContain('browser_navigate, blog-writer, code-reviewer');
+    expect(text).toContain('Tools in this turn (3)');
+    expect(text).toContain('code-reviewer');
+
+    await page.locator('[data-turn-id="turn-tail"]').click();
+    text = await page.locator('#inspector-dialog').innerText();
+    expect(text).toContain('partial tail window');
+    expect(text).toContain('running');
+  });
+
+  test('HTML inspector uses native scroll containers for long lists', async ({ page }) => {
+    await page.addInitScript((fixture) => { (window as any).__missionControlFixture = fixture; }, overflowingInspectorFixture());
+    await page.goto(GAME_URL);
+    await waitForGame(page);
+
+    await page.locator('#dom-session [data-cmc-action="inspector"]').click();
+    await expect(page.locator('#inspector-overlay')).toHaveClass(/visible/);
+    const list = page.locator('#inspector-list');
+    await expect(list.locator('[data-tool-key]').first()).toContainText('tool-36');
+    const before = await list.evaluate((el) => ({ top: el.scrollTop, max: el.scrollHeight - el.clientHeight }));
+    expect(before.max).toBeGreaterThan(0);
+    const scrollbarStyle = await list.evaluate((el) => {
+      const style = window.getComputedStyle(el);
+      return {
+        gutter: style.scrollbarGutter,
+        color: style.scrollbarColor,
+      };
+    });
+    expect(scrollbarStyle.gutter).toContain('stable');
+    expect(scrollbarStyle.color).not.toBe('auto');
+    const box = await list.boundingBox();
+    expect(box).toBeTruthy();
+    await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+    await page.mouse.wheel(0, 120);
+    await expect.poll(() => list.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
   });
 
   test('navbar model chip mirrors the selected session and updates on session switch', async ({ page }) => {
@@ -266,11 +467,7 @@ test.describe('Copilot Mission Control — Dashboard', () => {
     await expect(page.locator('#model-chip')).not.toHaveClass(/empty/);
 
     // Click into alpha123 → chip should switch to its model.
-    const before = await getMissionState(page);
-    const alphaRow = before!.sessionPickerRows.find((row: any) => row.id === 'alpha123');
-    expect(alphaRow).toBeTruthy();
-    const off = await canvasOffset(page);
-    await page.mouse.click(off.x + alphaRow.x + alphaRow.w / 2, off.y + alphaRow.y + alphaRow.h / 2);
+    await page.locator('#dom-session [data-session-id="alpha123"]').click();
     await page.waitForTimeout(150);
 
     await expect(page.locator('#model-chip')).toHaveText('gpt-5.5');

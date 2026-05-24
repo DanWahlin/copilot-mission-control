@@ -13,14 +13,14 @@
 //! provider's state directory changes. The callback is debounced to
 //! ~300ms so bursty writes coalesce into a single refresh.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{env, fs};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 
 use notify::{recommended_watcher, RecursiveMode, Watcher};
 use tauri::{AppHandle, Manager};
@@ -102,6 +102,11 @@ pub struct AgentSessionSummary {
     /// (tool name, category, success, timestamp, duration ms).
     #[serde(default)]
     pub recent_tool_calls: Vec<SessionToolCall>,
+    /// Recent assistant turns observed in the tail window. These are
+    /// sanitized rollups only: no prompt text, assistant text, tool args,
+    /// command output, file paths, or diffs.
+    #[serde(default)]
+    pub recent_turns: Vec<SessionTurnSummary>,
 }
 
 #[derive(serde::Serialize, Default, Clone)]
@@ -110,8 +115,47 @@ pub struct SessionToolCall {
     pub category: String,
     pub timestamp: String,
     pub success: bool,
+    #[serde(default)]
+    pub completed_at: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub call_id: String,
+    #[serde(default)]
+    pub turn_id: String,
+    #[serde(default)]
+    pub target: String,
+    #[serde(default)]
+    pub details: Vec<SafeDetail>,
     /// Duration in ms between matching start/complete events. None when
     /// the call is still in flight or the complete event is missing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+}
+
+#[derive(serde::Serialize, Default, Clone)]
+pub struct SafeDetail {
+    pub label: String,
+    pub value: String,
+}
+
+#[derive(serde::Serialize, Default, Clone)]
+pub struct SessionTurnSummary {
+    pub id: String,
+    pub started_at: String,
+    pub ended_at: String,
+    pub status: String,
+    pub tool_count: usize,
+    #[serde(default)]
+    pub tools: Vec<String>,
+    pub failure_count: usize,
+    pub categories: Vec<String>,
+    pub model: String,
+    pub output_tokens: u64,
+    /// True when the scanner saw activity for a turn but the turn_start
+    /// event was outside the tail window.
+    #[serde(default)]
+    pub partial: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
 }
@@ -213,6 +257,10 @@ const STALE_SESSION_CUTOFF_SECS: u64 = 24 * 60 * 60;
 /// Skills, Agents) survive bursts of high-volume categories (bash,
 /// view) without getting evicted from the buffer.
 const MAX_SESSION_TOOL_CALLS: usize = 120;
+/// Turn summaries retained per session for the turn-by-turn story panel.
+/// Matches the same "recent, bounded, tail-window" philosophy as tool
+/// calls so the bridge payload stays small even during long sessions.
+const MAX_SESSION_TURNS: usize = 80;
 
 pub fn collect_agent_activity() -> AgentActivity {
     let providers = default_providers();
@@ -673,6 +721,90 @@ fn sanitize_session_title(summary: Option<&String>) -> Option<String> {
     }
 }
 
+struct PendingToolStart {
+    timestamp: String,
+    category: String,
+    tool: String,
+    call_id: String,
+    turn_id: String,
+}
+
+#[derive(Default)]
+struct TurnBuilder {
+    id: String,
+    started_at: String,
+    ended_at: String,
+    tool_count: usize,
+    tools: Vec<String>,
+    failure_count: usize,
+    categories: BTreeSet<String>,
+    model: String,
+    output_tokens: u64,
+    partial: bool,
+}
+
+impl TurnBuilder {
+    fn to_summary(&self) -> SessionTurnSummary {
+        let duration_ms = parse_iso_ms(&self.ended_at)
+            .zip(parse_iso_ms(&self.started_at))
+            .and_then(|(end, start)| {
+                if end >= start {
+                    Some(end - start)
+                } else {
+                    None
+                }
+            });
+        let status = if self.failure_count > 0 {
+            "failed"
+        } else if self.ended_at.is_empty() {
+            "running"
+        } else {
+            "complete"
+        };
+        SessionTurnSummary {
+            id: self.id.clone(),
+            started_at: self.started_at.clone(),
+            ended_at: self.ended_at.clone(),
+            status: status.to_string(),
+            tool_count: self.tool_count,
+            tools: self.tools.clone(),
+            failure_count: self.failure_count,
+            categories: self.categories.iter().cloned().collect(),
+            model: self.model.clone(),
+            output_tokens: self.output_tokens,
+            partial: self.partial,
+            duration_ms,
+        }
+    }
+}
+
+fn ensure_turn<'a>(
+    turns: &'a mut BTreeMap<String, TurnBuilder>,
+    turn_order: &mut Vec<String>,
+    turn_id: &str,
+    timestamp: &str,
+    partial: bool,
+) -> &'a mut TurnBuilder {
+    if !turns.contains_key(turn_id) {
+        turn_order.push(turn_id.to_string());
+        turns.insert(
+            turn_id.to_string(),
+            TurnBuilder {
+                id: turn_id.to_string(),
+                started_at: timestamp.to_string(),
+                partial,
+                ..Default::default()
+            },
+        );
+    }
+    let turn = turns.get_mut(turn_id).expect("turn inserted above");
+    if turn.started_at.is_empty() || timestamp < turn.started_at.as_str() {
+        turn.started_at = timestamp.to_string();
+    }
+    turn.partial |= partial;
+    turn
+}
+
 fn summarize_events(
     provider: &'static str,
     path: &Path,
@@ -715,12 +847,14 @@ fn summarize_events(
         let _ = file.seek(SeekFrom::Start(file_len - MAX_READ_BYTES));
     }
 
-    // Pending tool starts keyed by tool name. Lets us compute duration
-    // on the matching complete event without storing the call_id (which
-    // events.jsonl doesn't always set). When two calls to the same tool
-    // overlap we'd lose the inner duration, but Copilot CLI runs tool
-    // calls sequentially within a session so this is safe in practice.
-    let mut pending_starts: BTreeMap<String, (String, String)> = BTreeMap::new();
+    // Pending tool starts keyed by toolCallId when available, falling
+    // back to tool name for older/incomplete events. Captures the turn at
+    // start time so a later completion can't drift into a newer turn.
+    let mut pending_starts: BTreeMap<String, PendingToolStart> = BTreeMap::new();
+    let mut turn_order: Vec<String> = Vec::new();
+    let mut turns: BTreeMap<String, TurnBuilder> = BTreeMap::new();
+    let mut active_turn_id: Option<String> = None;
+    let mut current_model = summary.last_model.clone();
     let reader = BufReader::new(file);
     for line in reader.lines().map_while(Result::ok) {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
@@ -748,7 +882,8 @@ fn summarize_events(
             .and_then(|v| v.as_str())
         {
             if !model.is_empty() {
-                summary.last_model = model.to_string();
+                current_model = model.to_string();
+                summary.last_model = current_model.clone();
             }
         }
 
@@ -759,11 +894,30 @@ fn summarize_events(
                 .and_then(|v| v.as_str())
                 .unwrap_or("tool")
                 .to_string();
-            let args = value
-                .get("data")
-                .and_then(|data| data.get("arguments"));
+            let args = value.get("data").and_then(|data| data.get("arguments"));
+            let raw_call_id = raw_tool_call_id(&value);
+            let call_id = raw_call_id
+                .as_deref()
+                .map(|id| safe_ref_id("call", id))
+                .unwrap_or_default();
+            let turn_id = raw_event_turn_id(&value)
+                .map(|id| safe_ref_id("turn", &id))
+                .or_else(|| active_turn_id.clone())
+                .unwrap_or_default();
             let (tool_name, category) = classify_tool(&raw_tool_name, args, mcp_allowlist);
             record_last_event(summary, &timestamp, event_type, &category);
+            if !turn_id.is_empty() {
+                let partial = !turns.contains_key(&turn_id);
+                let turn = ensure_turn(&mut turns, &mut turn_order, &turn_id, &timestamp, partial);
+                turn.tool_count += 1;
+                if turn.tools.len() < 12 {
+                    turn.tools.push(tool_name.clone());
+                }
+                turn.categories.insert(category.clone());
+                if turn.model.is_empty() {
+                    turn.model = current_model.clone();
+                }
+            }
 
             summary.tool_count += 1;
             summary.last_tool = tool_name.clone();
@@ -800,10 +954,26 @@ fn summarize_events(
                     category: category.clone(),
                     timestamp: timestamp.clone(),
                     success: true,
+                    completed_at: String::new(),
+                    model: current_model.clone(),
+                    call_id: call_id.clone(),
+                    turn_id: turn_id.clone(),
+                    target: tool_name.clone(),
+                    details: build_safe_tool_details(provider, &raw_tool_name, &category, args),
                     duration_ms: None,
                 },
             );
-            pending_starts.insert(tool_name, (timestamp, category));
+            let pending_key = raw_call_id.unwrap_or_else(|| tool_name.clone());
+            pending_starts.insert(
+                pending_key,
+                PendingToolStart {
+                    timestamp,
+                    category,
+                    tool: tool_name,
+                    call_id,
+                    turn_id,
+                },
+            );
         } else if event_type == "tool.execution_complete" {
             let success = value
                 .get("data")
@@ -830,21 +1000,40 @@ fn summarize_events(
             // no matches, `test` returning non-zero) aren't actionable
             // for the dev — they're normal LLM exploration — so they
             // don't bump error_count and don't turn the session red.
-            let last_tool = summary.last_tool.clone();
-            if let Some((start_ts, cat)) = pending_starts.remove(&last_tool) {
+            let complete_key =
+                raw_tool_call_id(&value).unwrap_or_else(|| summary.last_tool.clone());
+            if let Some(start) = pending_starts.remove(&complete_key) {
                 let duration_ms = parse_iso_ms(&timestamp)
-                    .zip(parse_iso_ms(&start_ts))
-                    .and_then(|(end, start)| if end >= start { Some(end - start) } else { None });
-                if let Some(entry) = summary
-                    .recent_tool_calls
-                    .iter_mut()
-                    .rev()
-                    .find(|entry| entry.tool == last_tool && entry.duration_ms.is_none())
-                {
+                    .zip(parse_iso_ms(&start.timestamp))
+                    .and_then(|(end, start)| {
+                        if end >= start {
+                            Some(end - start)
+                        } else {
+                            None
+                        }
+                    });
+                if let Some(entry) = summary.recent_tool_calls.iter_mut().rev().find(|entry| {
+                    if !start.call_id.is_empty() {
+                        entry.call_id == start.call_id
+                    } else {
+                        entry.tool == start.tool && entry.duration_ms.is_none()
+                    }
+                }) {
                     entry.success = success;
                     entry.duration_ms = duration_ms;
+                    entry.completed_at = timestamp.clone();
                 }
-                if !success && cat != "terminal" {
+                if !start.turn_id.is_empty() {
+                    if let Some(turn) = turns.get_mut(&start.turn_id) {
+                        if !success {
+                            turn.failure_count += 1;
+                        }
+                        if turn.model.is_empty() {
+                            turn.model = current_model.clone();
+                        }
+                    }
+                }
+                if !success && start.category != "terminal" {
                     summary.error_count += 1;
                 }
             }
@@ -867,10 +1056,20 @@ fn summarize_events(
                 .and_then(|v| v.as_u64())
             {
                 summary.output_tokens += tokens;
+                let turn_id = raw_event_turn_id(&value)
+                    .map(|id| safe_ref_id("turn", &id))
+                    .or_else(|| active_turn_id.clone());
+                if let Some(turn_id) = turn_id {
+                    let partial = !turns.contains_key(&turn_id);
+                    let turn =
+                        ensure_turn(&mut turns, &mut turn_order, &turn_id, &timestamp, partial);
+                    turn.output_tokens += tokens;
+                    if turn.model.is_empty() {
+                        turn.model = current_model.clone();
+                    }
+                }
             }
-        } else if event_type == "session.compaction_complete"
-            || event_type == "session.shutdown"
-        {
+        } else if event_type == "session.compaction_complete" || event_type == "session.shutdown" {
             // Token aggregation is shared with the head-pass helper
             // (`fold_skipped_token_events`) so the same accounting rules
             // apply whether the event lands in the 8 MiB tail or in the
@@ -883,6 +1082,30 @@ fn summarize_events(
         ) {
             if event_type == "assistant.turn_start" {
                 summary.turn_count += 1;
+                let raw_turn = raw_event_turn_id(&value).unwrap_or_else(|| timestamp.clone());
+                let turn_id = safe_ref_id("turn", &raw_turn);
+                active_turn_id = Some(turn_id.clone());
+                let turn = ensure_turn(&mut turns, &mut turn_order, &turn_id, &timestamp, false);
+                turn.partial = false;
+                if turn.model.is_empty() {
+                    turn.model = current_model.clone();
+                }
+            } else if event_type == "assistant.turn_end" {
+                let turn_id = raw_event_turn_id(&value)
+                    .map(|id| safe_ref_id("turn", &id))
+                    .or_else(|| active_turn_id.clone());
+                if let Some(turn_id) = turn_id {
+                    let partial = !turns.contains_key(&turn_id);
+                    let turn =
+                        ensure_turn(&mut turns, &mut turn_order, &turn_id, &timestamp, partial);
+                    turn.ended_at = timestamp.clone();
+                    if turn.model.is_empty() {
+                        turn.model = current_model.clone();
+                    }
+                    if active_turn_id.as_deref() == Some(turn_id.as_str()) {
+                        active_turn_id = None;
+                    }
+                }
             }
             recent_events.push(AgentEventSummary {
                 provider: provider.to_string(),
@@ -895,6 +1118,12 @@ fn summarize_events(
             });
         }
     }
+    let start = turn_order.len().saturating_sub(MAX_SESSION_TURNS);
+    summary.recent_turns = turn_order[start..]
+        .iter()
+        .filter_map(|id| turns.get(id))
+        .map(TurnBuilder::to_summary)
+        .collect();
 }
 
 /// Apply the token deltas from a single `session.compaction_complete`
@@ -933,7 +1162,10 @@ fn apply_token_event(
 ) {
     match event_type {
         "session.compaction_complete" => {
-            if let Some(used) = value.get("data").and_then(|d| d.get("compactionTokensUsed")) {
+            if let Some(used) = value
+                .get("data")
+                .and_then(|d| d.get("compactionTokensUsed"))
+            {
                 if let Some(n) = used.get("inputTokens").and_then(|v| v.as_u64()) {
                     summary.input_tokens += n;
                 }
@@ -1073,6 +1305,52 @@ fn record_last_event(
     }
 }
 
+fn raw_event_turn_id(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("data")
+        .and_then(|data| data.get("turnId").or_else(|| data.get("turn_id")))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn raw_tool_call_id(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("data")
+        .and_then(|data| data.get("toolCallId").or_else(|| data.get("tool_call_id")))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn safe_ref_id(prefix: &str, raw: &str) -> String {
+    let suffix = raw
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(8)
+        .collect::<String>();
+    if suffix.is_empty() {
+        String::new()
+    } else {
+        format!("{}-{}", prefix, suffix)
+    }
+}
+
+fn sanitize_identifier(raw: &str, fallback: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > 64 {
+        return fallback.to_string();
+    }
+    if trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+    {
+        trimmed.to_string()
+    } else {
+        fallback.to_string()
+    }
+}
+
 fn classify_tool(
     raw_name: &str,
     args: Option<&serde_json::Value>,
@@ -1081,27 +1359,72 @@ fn classify_tool(
     // Meta-tools like `skill` and `task` carry their real identity in
     // their arguments (skill name, sub-agent type). Surfacing those
     // identifiers makes the activity feed and tool ranking actually
-    // useful. We allowlist only the static identifier fields — no
-    // prompt text or other args cross the boundary.
+    // useful. We sanitize only the static identifier fields — no prompt
+    // text or other args cross the boundary.
     let lower = raw_name.to_ascii_lowercase();
     if lower == "skill" {
         let skill_name = args
             .and_then(|a| a.get("skill"))
             .and_then(|v| v.as_str())
-            .unwrap_or("skill")
-            .to_string();
+            .map(|value| sanitize_identifier(value, "skill"))
+            .unwrap_or_else(|| "skill".to_string());
         return (skill_name, "skills".to_string());
     }
     if lower == "task" {
         let subagent = args
             .and_then(|a| a.get("subagent_type"))
             .and_then(|v| v.as_str())
-            .unwrap_or("task")
-            .to_string();
+            .map(|value| sanitize_identifier(value, "task"))
+            .unwrap_or_else(|| "task".to_string());
         return (subagent, "delegates".to_string());
     }
     let category = categorize_tool(raw_name, mcp_allowlist).to_string();
-    (raw_name.to_string(), category)
+    (sanitize_identifier(raw_name, "tool"), category)
+}
+
+fn build_safe_tool_details(
+    provider: &str,
+    raw_name: &str,
+    category: &str,
+    args: Option<&serde_json::Value>,
+) -> Vec<SafeDetail> {
+    let mut details = vec![
+        safe_detail("Type", detail_kind(category)),
+        safe_detail("Provider", provider),
+        safe_detail("Privacy", "arguments/output hidden"),
+    ];
+    if raw_name.eq_ignore_ascii_case("task") {
+        if let Some(mode) = args
+            .and_then(|a| a.get("mode"))
+            .and_then(|v| v.as_str())
+            .map(|value| sanitize_identifier(value, ""))
+            .filter(|value| !value.is_empty())
+        {
+            details.push(safe_detail("Mode", &mode));
+        }
+    }
+    details
+}
+
+fn detail_kind(category: &str) -> &'static str {
+    match category {
+        "mcp" => "MCP tool",
+        "skills" => "Skill",
+        "delegates" => "Sub-agent",
+        "terminal" => "Command tool",
+        "signal" => "Web/docs tool",
+        "forge" => "Edit tool",
+        "library" => "Read/search tool",
+        "court" => "Control tool",
+        _ => "Tool",
+    }
+}
+
+fn safe_detail(label: &str, value: &str) -> SafeDetail {
+    SafeDetail {
+        label: label.to_string(),
+        value: value.to_string(),
+    }
 }
 
 /// Load all MCP-registered tool names from `~/.copilot/m-mcp-servers.json`
@@ -1398,13 +1721,20 @@ mod tests {
         ]);
 
         let activity = merge_scans(vec![scan]);
-        let mcp_tools: Vec<&AgentToolMetric> =
-            activity.tools.iter().filter(|t| t.category == "mcp").collect();
+        let mcp_tools: Vec<&AgentToolMetric> = activity
+            .tools
+            .iter()
+            .filter(|t| t.category == "mcp")
+            .collect();
         assert!(
             !mcp_tools.is_empty(),
             "MCP tools must survive truncation even when terminal/library dominate; \
              got tools = {:?}",
-            activity.tools.iter().map(|t| (&t.name, &t.category, t.count)).collect::<Vec<_>>()
+            activity
+                .tools
+                .iter()
+                .map(|t| (&t.name, &t.category, t.count))
+                .collect::<Vec<_>>()
         );
     }
 
@@ -1433,7 +1763,11 @@ mod tests {
 
         let scan = scan_with_tools(&entries);
         let activity = merge_scans(vec![scan]);
-        let terminal_count = activity.tools.iter().filter(|t| t.category == "terminal").count();
+        let terminal_count = activity
+            .tools
+            .iter()
+            .filter(|t| t.category == "terminal")
+            .count();
         assert!(
             terminal_count <= MAX_TOOLS_PER_CATEGORY,
             "terminal got {} entries under contention, expected <= {}",
@@ -1563,6 +1897,154 @@ mod tests {
         assert_eq!(categorize_tool("report_intent", &allowlist), "court");
     }
 
+    #[test]
+    fn skill_and_subagent_identifiers_are_sanitized() {
+        let allowlist = HashSet::new();
+        let args = serde_json::json!({
+            "skill": "secret prompt /Users/dan/.env",
+            "subagent_type": "code-reviewer",
+            "prompt": "do not expose me"
+        });
+
+        assert_eq!(
+            classify_tool("skill", Some(&args), &allowlist),
+            ("skill".to_string(), "skills".to_string())
+        );
+        assert_eq!(
+            classify_tool("task", Some(&args), &allowlist),
+            ("code-reviewer".to_string(), "delegates".to_string())
+        );
+    }
+
+    #[test]
+    fn summarize_events_builds_safe_tool_details_and_turns() {
+        use std::io::Write;
+        let mut path = std::env::temp_dir();
+        path.push("cmc_test_safe_details_turns.jsonl");
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut f = std::fs::File::create(&path).expect("create temp jsonl");
+            writeln!(
+                f,
+                r#"{{"type":"assistant.turn_start","timestamp":"2026-01-01T00:00:00.000Z","data":{{"turnId":"turn-alpha","model":"gpt-5.5"}}}}"#
+            )
+            .unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"tool.execution_start","timestamp":"2026-01-01T00:00:01.000Z","data":{{"toolName":"skill","toolCallId":"call-skill","turnId":"turn-alpha","model":"gpt-5.5","arguments":{{"skill":"blog-writer","prompt":"SECRET_PROMPT"}}}}}}"#
+            )
+            .unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"tool.execution_complete","timestamp":"2026-01-01T00:00:02.500Z","data":{{"toolCallId":"call-skill","turnId":"turn-alpha","success":true}}}}"#
+            )
+            .unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"tool.execution_start","timestamp":"2026-01-01T00:00:03.000Z","data":{{"toolName":"task","toolCallId":"call-task","turnId":"turn-alpha","arguments":{{"subagent_type":"code-reviewer","mode":"background","prompt":"SECRET_TASK"}}}}}}"#
+            )
+            .unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"tool.execution_complete","timestamp":"2026-01-01T00:00:04.000Z","data":{{"toolCallId":"call-task","turnId":"turn-alpha","success":false}}}}"#
+            )
+            .unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"assistant.message","timestamp":"2026-01-01T00:00:05.000Z","data":{{"turnId":"turn-alpha","outputTokens":321}}}}"#
+            )
+            .unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"assistant.turn_end","timestamp":"2026-01-01T00:00:06.000Z","data":{{"turnId":"turn-alpha"}}}}"#
+            )
+            .unwrap();
+        }
+
+        let mut summary = AgentSessionSummary::default();
+        let mut tool_counts = BTreeMap::new();
+        let mut recent_events = Vec::new();
+        let allowlist = HashSet::new();
+        summarize_events(
+            "test",
+            &path,
+            "test-session",
+            &mut summary,
+            &mut tool_counts,
+            &mut recent_events,
+            &allowlist,
+        );
+
+        assert_eq!(summary.recent_tool_calls.len(), 2);
+        assert_eq!(summary.recent_tool_calls[0].tool, "blog-writer");
+        assert_eq!(summary.recent_tool_calls[0].category, "skills");
+        assert_eq!(summary.recent_tool_calls[0].duration_ms, Some(1500));
+        assert_eq!(summary.recent_tool_calls[1].tool, "code-reviewer");
+        assert_eq!(summary.recent_tool_calls[1].category, "delegates");
+        assert!(!summary.recent_tool_calls[1].success);
+
+        assert_eq!(summary.recent_turns.len(), 1);
+        let turn = &summary.recent_turns[0];
+        assert_eq!(turn.tool_count, 2);
+        assert_eq!(
+            turn.tools,
+            vec!["blog-writer".to_string(), "code-reviewer".to_string()]
+        );
+        assert_eq!(turn.failure_count, 1);
+        assert_eq!(turn.status, "failed");
+        assert_eq!(turn.output_tokens, 321);
+        assert!(!turn.partial);
+        assert_eq!(turn.duration_ms, Some(6000));
+        assert_eq!(summary.recent_tool_calls[0].turn_id, turn.id);
+        assert!(turn.categories.contains(&"skills".to_string()));
+        assert!(turn.categories.contains(&"delegates".to_string()));
+
+        let serialized = serde_json::to_string(&summary).expect("serialize summary");
+        assert!(!serialized.contains("SECRET_PROMPT"));
+        assert!(!serialized.contains("SECRET_TASK"));
+        assert!(!serialized.contains("/Users/dan/.env"));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn tool_seen_without_turn_start_marks_turn_partial() {
+        use std::io::Write;
+        let mut path = std::env::temp_dir();
+        path.push("cmc_test_partial_turn.jsonl");
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut f = std::fs::File::create(&path).expect("create temp jsonl");
+            writeln!(
+                f,
+                r#"{{"type":"tool.execution_start","timestamp":"2026-01-01T00:00:03.000Z","data":{{"toolName":"bash","toolCallId":"call-bash","turnId":"turn-tail","arguments":{{"command":"SECRET_COMMAND"}}}}}}"#
+            )
+            .unwrap();
+        }
+
+        let mut summary = AgentSessionSummary::default();
+        let mut tool_counts = BTreeMap::new();
+        let mut recent_events = Vec::new();
+        let allowlist = HashSet::new();
+        summarize_events(
+            "test",
+            &path,
+            "test-session",
+            &mut summary,
+            &mut tool_counts,
+            &mut recent_events,
+            &allowlist,
+        );
+
+        assert_eq!(summary.recent_turns.len(), 1);
+        assert!(summary.recent_turns[0].partial);
+        assert_eq!(summary.recent_turns[0].status, "running");
+        let serialized = serde_json::to_string(&summary).expect("serialize summary");
+        assert!(!serialized.contains("SECRET_COMMAND"));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// Regression: `session.shutdown` reports cumulative token counts
     /// in a four-bucket `tokenDetails` block — fresh input, cache_read,
     /// cache_write, and output. Including `cache_read` in the input
@@ -1626,18 +2108,26 @@ mod tests {
     fn fold_skipped_token_events_aggregates_compactions_and_shutdown() {
         let input = concat!(
             // Two compactions: 100K + 200K = 300K input, 1K + 2K = 3K output.
-            r#"{"type":"session.compaction_complete","data":{"compactionTokensUsed":{"inputTokens":100000,"outputTokens":1000}}}"#, "\n",
-            r#"{"type":"assistant.message","data":{"outputTokens":50}}"#, "\n",
-            r#"{"type":"session.compaction_complete","data":{"compactionTokensUsed":{"inputTokens":200000,"outputTokens":2000}}}"#, "\n",
+            r#"{"type":"session.compaction_complete","data":{"compactionTokensUsed":{"inputTokens":100000,"outputTokens":1000}}}"#,
+            "\n",
+            r#"{"type":"assistant.message","data":{"outputTokens":50}}"#,
+            "\n",
+            r#"{"type":"session.compaction_complete","data":{"compactionTokensUsed":{"inputTokens":200000,"outputTokens":2000}}}"#,
+            "\n",
             // Shutdown reports 500K fresh + 50K cache_write = 550K, which
             // is larger than the running 300K from compactions, so it
             // should REPLACE input_tokens (not add).
-            r#"{"type":"session.shutdown","data":{"tokenDetails":{"input":{"tokenCount":500000},"cache_write":{"tokenCount":50000},"cache_read":{"tokenCount":999999999},"output":{"tokenCount":10000}}}}"#, "\n",
-            r#"{"type":"tool.execution_complete","data":{"toolCallId":"abc"}}"#, "\n",
+            r#"{"type":"session.shutdown","data":{"tokenDetails":{"input":{"tokenCount":500000},"cache_write":{"tokenCount":50000},"cache_read":{"tokenCount":999999999},"output":{"tokenCount":10000}}}}"#,
+            "\n",
+            r#"{"type":"tool.execution_complete","data":{"toolCallId":"abc"}}"#,
+            "\n",
         );
         let mut summary = AgentSessionSummary::default();
         fold_skipped_token_events(std::io::Cursor::new(input), &mut summary);
-        assert_eq!(summary.input_tokens, 550_000, "shutdown must replace running compaction sum when larger");
+        assert_eq!(
+            summary.input_tokens, 550_000,
+            "shutdown must replace running compaction sum when larger"
+        );
         // Output: 1K + 2K (compactions) = 3K, then max(3K, 10K shutdown) = 10K.
         assert_eq!(summary.output_tokens, 10_000);
     }
@@ -1714,17 +2204,42 @@ mod tests {
     fn every_observed_builtin_routes_to_a_known_quarter() {
         let allowlist = HashSet::new();
         const QUARTERS: &[&str] = &[
-            "forge", "library", "terminal", "signal", "delegates", "skills", "court", "mcp",
+            "forge",
+            "library",
+            "terminal",
+            "signal",
+            "delegates",
+            "skills",
+            "court",
+            "mcp",
         ];
         let tools = [
-            "bash", "write_bash", "read_bash", "stop_bash", "list_bash",
-            "view", "edit", "create", "apply_patch", "grep", "glob",
-            "web_fetch", "web_search", "fetch_copilot_cli_documentation",
-            "ask_user", "report_intent",
-            "store_memory", "vote_memory",
-            "exit_plan_mode", "manage_schedule",
-            "list_agents", "read_agent", "write_agent", "stop_agent",
-            "sql", "session_store_sql",
+            "bash",
+            "write_bash",
+            "read_bash",
+            "stop_bash",
+            "list_bash",
+            "view",
+            "edit",
+            "create",
+            "apply_patch",
+            "grep",
+            "glob",
+            "web_fetch",
+            "web_search",
+            "fetch_copilot_cli_documentation",
+            "ask_user",
+            "report_intent",
+            "store_memory",
+            "vote_memory",
+            "exit_plan_mode",
+            "manage_schedule",
+            "list_agents",
+            "read_agent",
+            "write_agent",
+            "stop_agent",
+            "sql",
+            "session_store_sql",
             "tool_search_tool_regex",
         ];
         for tool in tools {

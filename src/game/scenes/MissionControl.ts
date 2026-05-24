@@ -47,6 +47,7 @@ interface CopilotSessionSummary {
   last_model?: string;
   git_root?: string;
   recent_tool_calls?: SessionToolCall[];
+  recent_turns?: SessionTurnSummary[];
 }
 
 interface SessionToolCall {
@@ -54,6 +55,32 @@ interface SessionToolCall {
   category: string;
   timestamp: string;
   success: boolean;
+  completed_at?: string;
+  model?: string;
+  call_id?: string;
+  turn_id?: string;
+  target?: string;
+  details?: SafeDetail[];
+  duration_ms?: number;
+}
+
+interface SafeDetail {
+  label: string;
+  value: string;
+}
+
+interface SessionTurnSummary {
+  id: string;
+  started_at: string;
+  ended_at: string;
+  status: 'running' | 'complete' | 'failed' | string;
+  tool_count: number;
+  tools?: string[];
+  failure_count: number;
+  categories: string[];
+  model?: string;
+  output_tokens?: number;
+  partial?: boolean;
   duration_ms?: number;
 }
 
@@ -160,6 +187,9 @@ interface OpsSummary {
   reason: string;
 }
 
+type InspectorMode = 'tools' | 'turns';
+type InspectorTab = 'all' | 'mcp' | 'skills' | 'delegates' | 'failures';
+
 declare global {
   interface Window {
     __missionControlFixture?: CopilotActivity;
@@ -168,6 +198,13 @@ declare global {
     __cmcSetTheme?: (mode: 'dark' | 'light') => void;
     __cmcUpdateModel?: (model: string) => void;
     __cmcSetPanelsHidden?: (hidden: boolean) => void;
+    __cmcOpenInspector?: (session: CopilotSessionSummary) => boolean;
+    __cmcRenderDashboard?: (view: unknown) => void;
+    __cmcSelectSession?: (id: string) => void;
+    __cmcOpenSelectedSessionInEditor?: () => void;
+    __cmcToggleReplayPause?: () => void;
+    __cmcJumpReplayToLive?: () => void;
+    __cmcSeekReplayRatio?: (ratio: number) => void;
   }
 }
 
@@ -208,17 +245,17 @@ const DARK_THEME: MissionTheme = {
 
 const LIGHT_THEME: MissionTheme = {
   mode: 'light',
-  backdropFill: 0xeef2fb,
+  backdropFill: 0xf4f7fb,
   panelBg: 0xffffff,
   panelBgAlpha: 0.96,
-  panelStroke: 0xc6cfe6,
+  panelStroke: 0xd6dee9,
   panelStrokeAlpha: 1,
-  panelGradientTop: 0xf6f8fd,
-  cardBg: 0xe7ecf6,
+  panelGradientTop: 0xf8fafc,
+  cardBg: 0xffffff,
   cardBgAlpha: 0.95,
-  text: '#1a2240',
-  muted: '#5b6a8f',
-  rowBg: 0xdde3f1,
+  text: '#1f2937',
+  muted: '#64748b',
+  rowBg: 0xf1f5f9,
 };
 
 let theme: MissionTheme = DARK_THEME;
@@ -399,11 +436,6 @@ export class MissionControlScene extends Phaser.Scene {
   /// Last seen turn_end timestamp per session — debounces the "turn
   /// ended" chime so a re-render after the same event doesn't replay.
   private turnEndSeen: Map<string, string> = new Map();
-  private audioCtx?: AudioContext;
-  /// One-shot guard: we play at most one chime per app session. After
-  /// the first turn-end or attention chime we suppress every subsequent
-  /// one — recurring bells get annoying fast for a passive monitor.
-  private chimePlayedThisSession = false;
   /// Modal panel hit rects, populated during render when the transcript
   /// drill-down is open.
   private transcriptCloseRect: { x: number; y: number; w: number; h: number } | null = null;
@@ -415,6 +447,22 @@ export class MissionControlScene extends Phaser.Scene {
   private transcriptRowCount = 0;
   private transcriptScrollUpRect: { x: number; y: number; w: number; h: number } | null = null;
   private transcriptScrollDownRect: { x: number; y: number; w: number; h: number } | null = null;
+  private transcriptScrollTrackRect: { x: number; y: number; w: number; h: number } | null = null;
+  private transcriptScrollThumbRect: { x: number; y: number; w: number; h: number } | null = null;
+  private transcriptScrollDrag: {
+    maxOffset: number;
+    travelPx: number;
+    trackY: number;
+    thumbGrabY: number;
+  } | null = null;
+  private canvasWheelHandler?: (event: WheelEvent) => void;
+  private inspectorMode: InspectorMode = 'tools';
+  private inspectorTab: InspectorTab = 'all';
+  private selectedToolCallKey: string | null = null;
+  private selectedTurnId: string | null = null;
+  private inspectorModeRects: Array<{ mode: InspectorMode; x: number; y: number; w: number; h: number }> = [];
+  private inspectorTabRects: Array<{ tab: InspectorTab; x: number; y: number; w: number; h: number }> = [];
+  private inspectorRowRects: Array<{ kind: InspectorMode; id: string; x: number; y: number; w: number; h: number }> = [];
   public selectedSessionIndex = 0;
 
   public activity: CopilotActivity = createEmptyActivity();
@@ -427,6 +475,23 @@ export class MissionControlScene extends Phaser.Scene {
   public activeEventPulseCount = 0;
   public quarterEventBadges: Record<string, number> = {};
   public hoveredQuarterKey: string | null = null;
+  public inspectorState: {
+    mode: InspectorMode;
+    tab: InspectorTab;
+    selectedToolCallKey: string | null;
+    selectedTurnId: string | null;
+    visibleRows: number;
+    scrollOffset: number;
+    rowCount: number;
+  } = {
+    mode: 'tools',
+    tab: 'all',
+    selectedToolCallKey: null,
+    selectedTurnId: null,
+    visibleRows: 0,
+    scrollOffset: 0,
+    rowCount: 0,
+  };
   /// `renderActivity()` destroys ~50 Phaser Text objects and recreates
   /// them — each Text uploads a fresh canvas2d → WebGL texture, so
   /// one rebuild can cost 30-100ms. If that spike lands while comet
@@ -495,7 +560,9 @@ export class MissionControlScene extends Phaser.Scene {
     const prefs = loadMissionPrefs();
     this.inspectedQuarterKey = prefs.inspectedQuarterKey ?? null;
     if (prefs.replayPaused) this.replayPaused = true;
-    if (prefs.transcriptOpen) this.transcriptOpen = true;
+    // Inspector is now rendered by the DOM overlay in hud.js. Keep the
+    // Phaser transcript implementation available as a fallback, but do
+    // not auto-restore it from old localStorage.
     if (typeof prefs.lastSelectedSessionId === 'string') {
       // Mark as user-selected so pickSelectedSession respects the
       // restored id instead of jumping back to the needs-attention
@@ -552,6 +619,26 @@ export class MissionControlScene extends Phaser.Scene {
       this.quarters = this.buildQuarters();
       this.renderActivity();
     };
+    window.__cmcSelectSession = (id: string) => {
+      if (!this.scene?.isActive?.()) return;
+      this.selectSessionById(id);
+    };
+    window.__cmcOpenSelectedSessionInEditor = () => {
+      if (!this.scene?.isActive?.()) return;
+      this.openSelectedSessionInEditor();
+    };
+    window.__cmcToggleReplayPause = () => {
+      if (!this.scene?.isActive?.()) return;
+      this.toggleReplayPause();
+    };
+    window.__cmcJumpReplayToLive = () => {
+      if (!this.scene?.isActive?.()) return;
+      this.jumpReplayToLive();
+    };
+    window.__cmcSeekReplayRatio = (ratio: number) => {
+      if (!this.scene?.isActive?.()) return;
+      this.seekReplay(Math.round(Math.max(0, Math.min(1, ratio)) * this.eventLog.length));
+    };
     // Startup retry ramp: the very first invoke can race the Tauri bridge
     // becoming ready or a Copilot session being mid-write. Re-poll a few
     // times in the first ~10s so the user sees the mission populate
@@ -579,17 +666,26 @@ export class MissionControlScene extends Phaser.Scene {
     // rect data stored on the scene so re-renders don't churn input
     // objects.
     this.input.on('pointerdown', this.handleScenePointerDown, this);
+    this.input.on('pointermove', this.handleScenePointerMove, this);
+    this.input.on('pointerup', this.handleScenePointerUp, this);
+    this.input.on('pointerupoutside', this.handleScenePointerUp, this);
     // Wheel scrolling for the transcript drill-down. Phaser fires this
     // for any wheel event on the canvas; we guard so it only acts when
     // the transcript is open. Wheel delta is mapped to rows so a
     // single notch (dy ≈ 100 on a mouse, 16-40 on a trackpad) jumps
     // ~3 rows instead of 1 — matches browser scroll feel.
     this.input.on('wheel', (_p: any, _go: any, _dx: number, dy: number) => {
-      if (!this.transcriptOpen) return;
-      if (dy === 0) return;
-      const rows = Math.max(1, Math.round(Math.abs(dy) / 30));
-      this.adjustTranscriptScroll(Math.sign(dy) * rows);
+      this.handleInspectorWheel(dy);
     });
+    const canvas = this.game?.canvas as HTMLCanvasElement | undefined;
+    if (canvas) {
+      this.canvasWheelHandler = (event: WheelEvent) => {
+        if (!this.transcriptOpen) return;
+        event.preventDefault();
+        this.handleInspectorWheel(event.deltaY);
+      };
+      canvas.addEventListener('wheel', this.canvasWheelHandler, { passive: false });
+    }
   }
 
   update(_time: number, delta: number) {
@@ -663,8 +759,17 @@ export class MissionControlScene extends Phaser.Scene {
     const py = pointer.y;
     let over = false;
     if (this.transcriptOpen) {
-      // While modal is open, only the close button is interactive.
+      // While modal is open, only modal controls are interactive.
       if (this.hitRect(px, py, this.transcriptCloseRect)) over = true;
+      if (!over && this.hitRect(px, py, this.transcriptScrollUpRect)) over = true;
+      if (!over && this.hitRect(px, py, this.transcriptScrollDownRect)) over = true;
+      if (!over && this.hitRect(px, py, this.transcriptScrollThumbRect)) over = true;
+      if (!over && this.hitRect(px, py, this.transcriptScrollTrackRect)) over = true;
+      if (!over) {
+        over = this.inspectorModeRects.some(r => this.hitRect(px, py, r))
+          || this.inspectorTabRects.some(r => this.hitRect(px, py, r))
+          || this.inspectorRowRects.some(r => this.hitRect(px, py, r));
+      }
     } else {
       for (const row of this.sessionPickerRows) {
         if (this.hitRect(px, py, row)) { over = true; break; }
@@ -690,7 +795,14 @@ export class MissionControlScene extends Phaser.Scene {
     }
     this.startupRetryEvents = [];
     this.input?.off?.('pointerdown', this.handleScenePointerDown, this);
+    this.input?.off?.('pointermove', this.handleScenePointerMove, this);
+    this.input?.off?.('pointerup', this.handleScenePointerUp, this);
+    this.input?.off?.('pointerupoutside', this.handleScenePointerUp, this);
     const canvas = this.game?.canvas as HTMLCanvasElement | undefined;
+    if (canvas && this.canvasWheelHandler) {
+      canvas.removeEventListener('wheel', this.canvasWheelHandler);
+      this.canvasWheelHandler = undefined;
+    }
     if (canvas && canvas.style.cursor === 'pointer') canvas.style.cursor = 'default';
     // Only clear the push callback if it still belongs to this scene's
     // handler — guards against a newly-created scene's handler being
@@ -704,6 +816,11 @@ export class MissionControlScene extends Phaser.Scene {
     if (window.__cmcSetPanelsHidden) {
       window.__cmcSetPanelsHidden = undefined;
     }
+    window.__cmcSelectSession = undefined;
+    window.__cmcOpenSelectedSessionInEditor = undefined;
+    window.__cmcToggleReplayPause = undefined;
+    window.__cmcJumpReplayToLive = undefined;
+    window.__cmcSeekReplayRatio = undefined;
     // Blank the navbar model chip so a stale model id doesn't linger
     // when the scene tears down (game switch, hot reload, etc.).
     try { window.__cmcUpdateModel?.(''); } catch { /* no-op */ }
@@ -726,10 +843,6 @@ export class MissionControlScene extends Phaser.Scene {
     this.attentionEntered.clear();
     this.attentionAlertedAt.clear();
     this.turnEndSeen.clear();
-    if (this.audioCtx) {
-      try { void this.audioCtx.close(); } catch { /* ignore */ }
-      this.audioCtx = undefined;
-    }
     if (this.backdrop) {
       try { this.backdrop.destroy(); } catch { /* ignore */ }
       this.backdrop = null;
@@ -810,6 +923,7 @@ export class MissionControlScene extends Phaser.Scene {
 
     this.drawBackground();
     this.drawQuarters();
+    this.publishDashboardView();
     this.drawPanels();
   }
 
@@ -842,12 +956,12 @@ export class MissionControlScene extends Phaser.Scene {
         : Math.min(500, Math.max(380, W * 0.28));
     const rightX = this.panelsHidden ? W - leftX : W - rightW - leftX;
 
-    const insightH = Math.min(compact ? 370 : 450, Math.max(310, H * 0.42));
+    const insightH = Math.min(compact ? 430 : 520, Math.max(390, H * 0.46));
     // sessionH floor must accommodate picker header (22) + pickerTop offset
     // (22) + at least one row (28) + footer (14) + reserved details block
     // (168) + margin → ~294. Compact cap bumped accordingly so the row
     // strip and details stop overlapping at 1024×768 and 1280×800.
-    const sessionH = Math.min(compact ? 320 : 360, Math.max(294, H * 0.32));
+    const sessionH = Math.min(compact ? 350 : 400, Math.max(330, H * 0.35));
 
     // Replay strip is hidden in focus mode so the quarter inspector
     // can drop to the bottom edge and the mission ring picks up the
@@ -1367,6 +1481,19 @@ export class MissionControlScene extends Phaser.Scene {
   }
 
   private drawPanels() {
+    if (window.__cmcRenderDashboard) {
+      this.replayPlayButtonRect = null;
+      this.replayLiveButtonRect = null;
+      this.replayTrackRect = null;
+      this.openInEditorRect = null;
+      this.transcriptToggleRect = null;
+      if (this.transcriptOpen && this.selectedSession) {
+        this.drawTranscriptOverlay();
+      } else {
+        this.transcriptCloseRect = null;
+      }
+      return;
+    }
     const layout = this.layout!;
     const { leftX, topY, panelW, rightW, rightX,
             insightH, sessionH, replayH, replayY, bottomH, bottomY,
@@ -1695,7 +1822,7 @@ export class MissionControlScene extends Phaser.Scene {
     // `compactNumberShort` ("184k" vs "184.0k") keeps the single-line
     // string short enough to fit the right-panel inner width even at
     // the 1600×1000 default.
-    const tokensLine = `Tokens in/out: ${compactNumberShort(inTok)}/${compactNumberShort(outTok)}`;
+    const tokensLine = `Tokens: ${compactNumberShort(inTok)}/${compactNumberShort(outTok)}`;
     // CSS-grid-style row layout for the details block. Each row is
     // centered via setOrigin(0, 0.5) at a uniform pitch. The buttons
     // anchor to `actionsY = y + h - btnH - 16` (computed below), so
@@ -1738,13 +1865,13 @@ export class MissionControlScene extends Phaser.Scene {
     type Tier = { editor: string; transcript: string; editorMin: number; transcriptMin: number };
     const tiers: Tier[] = this.transcriptOpen
       ? [
-          { editor: '↗ Open in Editor', transcript: 'Close transcript', editorMin: 170, transcriptMin: 160 },
+          { editor: '↗ Open in Editor', transcript: 'Close inspector', editorMin: 170, transcriptMin: 160 },
           { editor: '↗ Editor', transcript: 'Close', editorMin: 0, transcriptMin: 0 },
         ]
       : [
-          { editor: '↗ Open in Editor', transcript: `Transcript (${tcalls})`, editorMin: 170, transcriptMin: 160 },
-          { editor: '↗ Editor', transcript: `Transcript (${tcalls})`, editorMin: 0, transcriptMin: 0 },
-          { editor: '↗ Editor', transcript: 'Transcript', editorMin: 0, transcriptMin: 0 },
+          { editor: '↗ Open in Editor', transcript: `Inspector (${tcalls})`, editorMin: 170, transcriptMin: 160 },
+          { editor: '↗ Editor', transcript: `Inspector (${tcalls})`, editorMin: 0, transcriptMin: 0 },
+          { editor: '↗ Editor', transcript: 'Inspector', editorMin: 0, transcriptMin: 0 },
         ];
     const widthOf = (label: string, min: number) => Math.max(min, label.length * 8 + 24);
 
@@ -1900,7 +2027,11 @@ export class MissionControlScene extends Phaser.Scene {
   private adjustTranscriptScroll(delta: number) {
     if (!this.transcriptOpen) return;
     const maxOffset = Math.max(0, this.transcriptRowCount - this.transcriptRowsVisible);
-    const next = Math.max(0, Math.min(maxOffset, this.transcriptScrollOffset + delta));
+    this.setTranscriptScrollOffset(this.transcriptScrollOffset + delta, maxOffset);
+  }
+
+  private setTranscriptScrollOffset(offset: number, maxOffset = Math.max(0, this.transcriptRowCount - this.transcriptRowsVisible)) {
+    const next = Math.max(0, Math.min(maxOffset, Math.round(offset)));
     if (next === this.transcriptScrollOffset) return;
     this.transcriptScrollOffset = next;
     // Scroll updates ONLY redraw the transcript overlay (one graphics
@@ -1909,6 +2040,12 @@ export class MissionControlScene extends Phaser.Scene {
     // renderActivity path destroyed and recreated every Text on the
     // canvas per wheel tick, which is what made scrolling feel laggy.
     this.renderTranscriptOnly();
+  }
+
+  private handleInspectorWheel(dy: number) {
+    if (!this.transcriptOpen || dy === 0) return;
+    const rows = Math.max(1, Math.round(Math.abs(dy) / 30));
+    this.adjustTranscriptScroll(Math.sign(dy) * rows);
   }
 
   private renderTranscriptOnly() {
@@ -1927,24 +2064,56 @@ export class MissionControlScene extends Phaser.Scene {
       fontFamily: '"Press Start 2P", monospace',
       fontSize: `${size}px`,
       color,
-      stroke: theme.mode === 'light' ? '#c6cfe6' : '#020713',
-      strokeThickness: theme.mode === 'light' ? 0 : 3,
+      strokeThickness: 0,
     }).setDepth(51);
     this.transcriptTextObjects.push(obj);
     return obj;
   }
 
-  /// Drill-down overlay: shows the selected session's last 120 tool
-  /// calls with timestamps + duration. Privacy-safe: no prompt text,
-  /// no command output, no file paths beyond the repo root shown above.
-  /// Scrollable via mouse wheel or up/down buttons in the scrollbar.
+  private filteredInspectorCalls(session: CopilotSessionSummary): SessionToolCall[] {
+    const calls = (session.recent_tool_calls ?? []).slice().reverse();
+    if (this.inspectorTab === 'all') return calls;
+    if (this.inspectorTab === 'failures') return calls.filter(call => !call.success);
+    return calls.filter(call => call.category === this.inspectorTab);
+  }
+
+  private selectedInspectorCall(calls: SessionToolCall[]): SessionToolCall | null {
+    if (calls.length === 0) return null;
+    const selected = this.selectedToolCallKey
+      ? calls.find(call => toolCallKey(call) === this.selectedToolCallKey)
+      : null;
+    return selected ?? calls[0];
+  }
+
+  private selectedInspectorTurn(turns: SessionTurnSummary[]): SessionTurnSummary | null {
+    if (turns.length === 0) return null;
+    const selected = this.selectedTurnId
+      ? turns.find(turn => turn.id === this.selectedTurnId)
+      : null;
+    return selected ?? turns[0];
+  }
+
+  private inspectorTabLabel(): string {
+    if (this.inspectorTab === 'all') return 'tool';
+    if (this.inspectorTab === 'failures') return 'failed';
+    if (this.inspectorTab === 'delegates') return 'sub-agent';
+    return this.inspectorTab;
+  }
+
+  /// Drill-down overlay: shows safe tool-call details and turn summaries.
+  /// Privacy-safe: no prompt text, no raw arguments, no command output,
+  /// no file paths, and no diffs cross into this renderer payload.
   private drawTranscriptOverlay() {
     const session = this.selectedSession!;
-    const calls = (session.recent_tool_calls ?? []).slice().reverse();
-    const w = Math.min(720, W * 0.7);
-    const h = Math.min(520, H * 0.72);
+    const calls = this.filteredInspectorCalls(session);
+    const turns = (session.recent_turns ?? []).slice().reverse();
+    const w = Math.min(1040, W * 0.86);
+    const h = Math.min(620, H * 0.78);
     const x = (W - w) / 2;
     const y = (H - h) / 2;
+    this.inspectorModeRects = [];
+    this.inspectorTabRects = [];
+    this.inspectorRowRects = [];
     // Paint into the dedicated overlay graphics layer (depth 50) so the
     // panel fully covers quarter labels/badges (text depth 20). Text we
     // add here gets depth 51 inside addTranscriptText for the same reason.
@@ -1957,8 +2126,9 @@ export class MissionControlScene extends Phaser.Scene {
     g.fillRoundedRect(x, y, w, h, 16);
     g.lineStyle(2, GOLD, 0.85);
     g.strokeRoundedRect(x, y, w, h, 16);
-    this.addTranscriptText(x + 24, y + 18, `Tool transcript · ${truncate(session.title || session.id, 32)}`, 14, '#ffd54a').setOrigin(0, 0);
-    this.addTranscriptText(x + 24, y + 42, `${session.repository} / ${session.branch} · ${calls.length} most recent calls`, 11, theme.muted).setOrigin(0, 0);
+    this.addTranscriptText(x + 24, y + 18, `Inspector · ${truncate(session.title || session.id, 34)}`, 14, '#ffd54a').setOrigin(0, 0);
+    const turnCount = session.recent_turns?.length ?? 0;
+    this.addTranscriptText(x + 24, y + 42, `${session.repository} / ${session.branch} · ${session.recent_tool_calls?.length ?? 0} calls · ${turnCount} turns`, 11, theme.muted).setOrigin(0, 0);
 
     const closeW = 32;
     const closeH = 24;
@@ -1973,22 +2143,86 @@ export class MissionControlScene extends Phaser.Scene {
     this.addTranscriptText(closeX + 10, closeY + 5, '✕', 10, '#ff7a7a').setOrigin(0, 0);
     this.transcriptCloseRect = { x: closeX, y: closeY, w: closeW, h: closeH };
 
-    if (calls.length === 0) {
-      this.addTranscriptText(x + 24, y + 80, 'No tool calls recorded yet for this session.', 12, theme.muted);
-      this.transcriptScrollUpRect = null;
-      this.transcriptScrollDownRect = null;
-      this.transcriptRowCount = 0;
-      this.transcriptRowsVisible = 0;
-      return;
-    }
-    const rowY0 = y + 76;
-    const rowH = 28;
+    const modeY = y + 70;
+    const modeW = 96;
+    this.drawInspectorToggle(x + 24, modeY, modeW, 26, 'Tools', this.inspectorMode === 'tools');
+    this.inspectorModeRects.push({ mode: 'tools', x: x + 24, y: modeY, w: modeW, h: 26 });
+    this.drawInspectorToggle(x + 24 + modeW + 8, modeY, modeW, 26, 'Turns', this.inspectorMode === 'turns');
+    this.inspectorModeRects.push({ mode: 'turns', x: x + 24 + modeW + 8, y: modeY, w: modeW, h: 26 });
+
+    const listX = x + 24;
+    const listY = y + 112;
+    const listW = Math.min(520, w * 0.52);
+    const detailX = listX + listW + 22;
+    const detailW = x + w - detailX - 24;
+    const rowH = this.inspectorMode === 'tools' ? 52 : 56;
     const scrollbarW = 14;
     const scrollGutter = 8;
-    const rowAreaH = h - (rowY0 - y) - 16;
+    const rowAreaH = h - (listY - y) - 22;
     const maxRows = Math.max(1, Math.floor(rowAreaH / rowH));
+
+    if (this.inspectorMode === 'tools') {
+      this.drawToolInspector(session, calls, x, y, listX, listY, listW, detailX, detailW, maxRows, rowH, scrollbarW, scrollGutter);
+    } else {
+      this.drawTurnInspector(session, turns, x, y, listX, listY, listW, detailX, detailW, maxRows, rowH, scrollbarW, scrollGutter);
+    }
+  }
+
+  private drawToolInspector(
+    session: CopilotSessionSummary,
+    calls: SessionToolCall[],
+    panelX: number,
+    _panelY: number,
+    listX: number,
+    listY: number,
+    listW: number,
+    detailX: number,
+    detailW: number,
+    maxRows: number,
+    rowH: number,
+    scrollbarW: number,
+    scrollGutter: number,
+  ) {
+    const tabs: Array<{ id: InspectorTab; label: string }> = [
+      { id: 'all', label: 'All' },
+      { id: 'mcp', label: 'MCP' },
+      { id: 'skills', label: 'Skills' },
+      { id: 'delegates', label: 'Sub-agents' },
+      { id: 'failures', label: 'Failures' },
+    ];
+    let tabX = panelX + 240;
+    const tabY = listY - 42;
+    for (const tab of tabs) {
+      const tw = Math.max(54, tab.label.length * 8 + 22);
+      this.drawInspectorToggle(tabX, tabY, tw, 24, tab.label, this.inspectorTab === tab.id);
+      this.inspectorTabRects.push({ tab: tab.id, x: tabX, y: tabY, w: tw, h: 24 });
+      tabX += tw + 7;
+    }
+
     this.transcriptRowCount = calls.length;
     this.transcriptRowsVisible = Math.min(maxRows, calls.length);
+    const selected = this.selectedInspectorCall(calls);
+    this.selectedToolCallKey = selected ? toolCallKey(selected) : null;
+    this.selectedTurnId = selected?.turn_id || this.selectedTurnId;
+    this.inspectorState = {
+      mode: this.inspectorMode,
+      tab: this.inspectorTab,
+      selectedToolCallKey: this.selectedToolCallKey,
+      selectedTurnId: this.selectedTurnId,
+      visibleRows: this.transcriptRowsVisible,
+      scrollOffset: this.transcriptScrollOffset,
+      rowCount: this.transcriptRowCount,
+    };
+
+    if (calls.length === 0) {
+      this.addTranscriptText(listX, listY, `No ${this.inspectorTabLabel().toLowerCase()} calls recorded yet.`, 12, theme.muted);
+      this.drawToolDetail(detailX, listY, detailW, null, session);
+      this.transcriptScrollUpRect = null;
+      this.transcriptScrollDownRect = null;
+      this.transcriptScrollTrackRect = null;
+      this.transcriptScrollThumbRect = null;
+      return;
+    }
 
     // Clamp scroll offset (calls.length may have grown/shrunk since last
     // render as live activity comes in).
@@ -1999,31 +2233,218 @@ export class MissionControlScene extends Phaser.Scene {
     const offset = this.transcriptScrollOffset;
     const visible = calls.slice(offset, offset + maxRows);
 
-    const rowLeftX = x + 16;
-    const rowRightX = x + w - scrollbarW - scrollGutter - 16;
-    const rowW = rowRightX - rowLeftX;
+    const rowRightX = listX + listW - scrollbarW - scrollGutter;
+    const rowW = rowRightX - listX;
     for (let i = 0; i < visible.length; i++) {
       const call = visible[i];
-      const ry = rowY0 + i * rowH;
+      const ry = listY + i * rowH;
       const color = call.success ? categoryColor(call.category) : 0xff5252;
-      g.fillStyle(color, 0.14);
-      g.fillRoundedRect(rowLeftX, ry - 2, rowW, rowH - 4, 6);
-      g.fillStyle(color, 1);
-      g.fillCircle(rowLeftX + 14, ry + 10, 4);
-      this.addTranscriptText(rowLeftX + 28, ry + 2, truncate(call.tool, 28), 12, theme.text).setOrigin(0, 0);
-      this.addTranscriptText(rowLeftX + 28 + 250, ry + 2, call.category, 10, theme.muted).setOrigin(0, 0);
+      const selectedRow = selected && toolCallKey(selected) === toolCallKey(call);
+      this.overlay.fillStyle(color, selectedRow ? 0.24 : 0.14);
+      this.overlay.fillRoundedRect(listX, ry - 2, rowW, rowH - 8, 6);
+      this.overlay.lineStyle(selectedRow ? 2 : 1, color, selectedRow ? 0.8 : 0.24);
+      this.overlay.strokeRoundedRect(listX, ry - 2, rowW, rowH - 8, 6);
+      this.overlay.fillStyle(color, 1);
+      this.overlay.fillCircle(listX + 14, ry + 15, 4);
+      this.addTranscriptText(listX + 28, ry + 7, truncate(call.tool, 28), 12, theme.text).setOrigin(0, 0);
+      this.addTranscriptText(listX + 28, ry + 30, `${callKindLabel(call)} · ${call.turn_id || 'no turn'}`, 9, theme.muted).setOrigin(0, 0);
       const dur = typeof call.duration_ms === 'number' ? formatDuration(call.duration_ms) : '·';
-      this.addTranscriptText(rowRightX - 8, ry + 2, `${dur}  ${formatClock(call.timestamp)}`, 10, theme.muted).setOrigin(1, 0);
+      this.addTranscriptText(rowRightX - 8, ry + 8, `${dur}  ${formatClock(call.timestamp)}`, 10, theme.muted).setOrigin(1, 0);
+      this.inspectorRowRects.push({ kind: 'tools', id: toolCallKey(call), x: listX, y: ry - 2, w: rowW, h: rowH - 8 });
     }
 
-    // Scrollbar — only render when there's overflow. Track + thumb +
-    // up/down nudge buttons. Wheel events also scroll (see input setup).
     if (calls.length > maxRows) {
-      this.drawTranscriptScrollbar(x + w, rowY0, maxRows, rowH, scrollbarW, scrollGutter, calls.length, maxOffset, offset);
+      this.drawTranscriptScrollbar(listX + listW, listY, maxRows, rowH, scrollbarW, scrollGutter, calls.length, maxOffset, offset);
     } else {
       this.transcriptScrollUpRect = null;
       this.transcriptScrollDownRect = null;
+      this.transcriptScrollTrackRect = null;
+      this.transcriptScrollThumbRect = null;
     }
+
+    this.drawToolDetail(detailX, listY, detailW, selected, session);
+  }
+
+  private drawTurnInspector(
+    session: CopilotSessionSummary,
+    turns: SessionTurnSummary[],
+    _panelX: number,
+    _panelY: number,
+    listX: number,
+    listY: number,
+    listW: number,
+    detailX: number,
+    detailW: number,
+    maxRows: number,
+    rowH: number,
+    scrollbarW: number,
+    scrollGutter: number,
+  ) {
+    this.transcriptRowCount = turns.length;
+    this.transcriptRowsVisible = Math.min(maxRows, turns.length);
+    const selected = this.selectedInspectorTurn(turns);
+    this.selectedTurnId = selected?.id ?? null;
+    this.inspectorState = {
+      mode: this.inspectorMode,
+      tab: this.inspectorTab,
+      selectedToolCallKey: this.selectedToolCallKey,
+      selectedTurnId: this.selectedTurnId,
+      visibleRows: this.transcriptRowsVisible,
+      scrollOffset: this.transcriptScrollOffset,
+      rowCount: this.transcriptRowCount,
+    };
+
+    if (turns.length === 0) {
+      this.addTranscriptText(listX, listY, 'No turn summaries recorded yet for this session.', 12, theme.muted);
+      this.drawTurnDetail(detailX, listY, detailW, null, session);
+      this.transcriptScrollUpRect = null;
+      this.transcriptScrollDownRect = null;
+      this.transcriptScrollTrackRect = null;
+      this.transcriptScrollThumbRect = null;
+      return;
+    }
+
+    const maxOffset = Math.max(0, turns.length - maxRows);
+    if (this.transcriptScrollOffset > maxOffset) {
+      this.transcriptScrollOffset = maxOffset;
+    }
+    const offset = this.transcriptScrollOffset;
+    const visible = turns.slice(offset, offset + maxRows);
+    const rowRightX = listX + listW - scrollbarW - scrollGutter;
+    const rowW = rowRightX - listX;
+    for (let i = 0; i < visible.length; i++) {
+      const turn = visible[i];
+      const ry = listY + i * rowH;
+      const color = turn.failure_count > 0 ? 0xff5252 : turn.status === 'running' ? 0x61d6ff : 0x60ff9a;
+      const selectedRow = selected?.id === turn.id;
+      this.overlay.fillStyle(color, selectedRow ? 0.24 : 0.14);
+      this.overlay.fillRoundedRect(listX, ry - 2, rowW, rowH - 8, 6);
+      this.overlay.lineStyle(selectedRow ? 2 : 1, color, selectedRow ? 0.8 : 0.24);
+      this.overlay.strokeRoundedRect(listX, ry - 2, rowW, rowH - 8, 6);
+      this.overlay.fillStyle(color, 1);
+      this.overlay.fillCircle(listX + 14, ry + 15, 4);
+      const partial = turn.partial ? 'partial - ' : '';
+      this.addTranscriptText(listX + 28, ry + 7, `${partial}${turn.status} · ${turn.tool_count} tools`, 12, theme.text).setOrigin(0, 0);
+      this.addTranscriptText(listX + 28, ry + 32, `${turn.categories.join(', ') || 'no tools'} · ${compactNumberShort(turn.output_tokens ?? 0)} out`, 9, theme.muted).setOrigin(0, 0);
+      this.addTranscriptText(rowRightX - 8, ry + 8, `${turnDurationLabel(turn)}  ${formatClock(turn.started_at)}`, 10, theme.muted).setOrigin(1, 0);
+      this.inspectorRowRects.push({ kind: 'turns', id: turn.id, x: listX, y: ry - 2, w: rowW, h: rowH - 8 });
+    }
+
+    if (turns.length > maxRows) {
+      this.drawTranscriptScrollbar(listX + listW, listY, maxRows, rowH, scrollbarW, scrollGutter, turns.length, maxOffset, offset);
+    } else {
+      this.transcriptScrollUpRect = null;
+      this.transcriptScrollDownRect = null;
+      this.transcriptScrollTrackRect = null;
+      this.transcriptScrollThumbRect = null;
+    }
+
+    this.drawTurnDetail(detailX, listY, detailW, selected, session);
+  }
+
+  private drawInspectorToggle(x: number, y: number, w: number, h: number, label: string, active: boolean) {
+    const color = active ? GOLD : cssToHex(theme.muted);
+    this.overlay.fillStyle(active ? 0x25346c : 0x1a2448, active ? 0.98 : 0.76);
+    this.overlay.fillRoundedRect(x, y, w, h, 6);
+    this.overlay.lineStyle(active ? 2 : 1, color, active ? 0.9 : 0.55);
+    this.overlay.strokeRoundedRect(x, y, w, h, 6);
+    this.addTranscriptText(x + w / 2, y + h / 2, label, label.length > 9 ? 9 : 10, active ? '#ffd54a' : theme.muted).setOrigin(0.5, 0.5);
+  }
+
+  private drawToolDetail(x: number, y: number, w: number, call: SessionToolCall | null, session: CopilotSessionSummary) {
+    this.overlay.fillStyle(0x101833, theme.mode === 'light' ? 0.72 : 0.86);
+    this.overlay.fillRoundedRect(x, y - 2, w, 360, 10);
+    this.overlay.lineStyle(1, 0x31437a, 0.75);
+    this.overlay.strokeRoundedRect(x, y - 2, w, 360, 10);
+    this.addTranscriptText(x + 16, y + 12, 'Safe details', 13, '#ffd54a').setOrigin(0, 0);
+    if (!call) {
+      this.addTranscriptText(x + 16, y + 42, 'Select a tool call to inspect.', 11, theme.muted).setOrigin(0, 0);
+      return;
+    }
+    const turn = (session.recent_turns ?? []).find(t => t.id === call.turn_id);
+    const fields: Array<[string, string]> = [
+      ['Tool', call.tool],
+      ['Category', callKindLabel(call)],
+      ['Status', call.success ? 'success' : 'failed'],
+      ['Started', `${formatClock(call.timestamp)} · ${call.timestamp || 'unknown'}`],
+      ['Duration', typeof call.duration_ms === 'number' ? formatDuration(call.duration_ms) : 'in flight'],
+      ['Turn', call.turn_id || 'not attributed'],
+      ['Model', call.model || turn?.model || 'unknown'],
+      ['Call ref', call.call_id || 'not available'],
+    ];
+    if (turn) {
+      fields.push(['Turn status', `${turn.status}${turn.partial ? ' · partial tail window' : ''}`]);
+    }
+    for (const detail of call.details ?? []) {
+      fields.push([detail.label, detail.value]);
+    }
+    fields.push(['Raw args', 'hidden by privacy boundary']);
+    fields.push(['Output', 'hidden by privacy boundary']);
+    let yy = y + 42;
+    for (const [label, value] of fields.slice(0, 13)) {
+      this.addTranscriptText(x + 16, yy, `${label}:`, 10, theme.muted).setOrigin(0, 0);
+      this.addWrappedTranscriptText(x + 132, yy, value, Math.max(120, w - 152), 10, theme.text);
+      yy += 24;
+    }
+  }
+
+  private drawTurnDetail(x: number, y: number, w: number, turn: SessionTurnSummary | null, session: CopilotSessionSummary) {
+    this.overlay.fillStyle(0x101833, theme.mode === 'light' ? 0.72 : 0.86);
+    this.overlay.fillRoundedRect(x, y - 2, w, 390, 10);
+    this.overlay.lineStyle(1, 0x31437a, 0.75);
+    this.overlay.strokeRoundedRect(x, y - 2, w, 390, 10);
+    this.addTranscriptText(x + 16, y + 12, 'Turn story', 13, '#ffd54a').setOrigin(0, 0);
+    if (!turn) {
+      this.addTranscriptText(x + 16, y + 42, 'Select a turn to inspect.', 11, theme.muted).setOrigin(0, 0);
+      return;
+    }
+    const fields: Array<[string, string]> = [
+      ['Status', `${turn.status}${turn.partial ? ' · partial tail window' : ''}`],
+      ['Started', `${formatClock(turn.started_at)} · ${turn.started_at || 'unknown'}`],
+      ['Duration', turnDurationLabel(turn)],
+      ['Tools', String(turn.tool_count)],
+      ['Ran', turnToolList(turn, session)],
+      ['Failures', String(turn.failure_count)],
+      ['Categories', turn.categories.join(', ') || 'none'],
+      ['Model', turn.model || 'unknown'],
+      ['Output', `${compactNumberShort(turn.output_tokens ?? 0)} tokens`],
+    ];
+    let yy = y + 42;
+    for (const [label, value] of fields) {
+      this.addTranscriptText(x + 16, yy, `${label}:`, 10, theme.muted).setOrigin(0, 0);
+      this.addWrappedTranscriptText(x + 132, yy, value, Math.max(120, w - 152), 10, theme.text);
+      yy += 24;
+    }
+
+    const related = (session.recent_tool_calls ?? []).filter(call => call.turn_id === turn.id).slice().reverse();
+    yy += 10;
+    this.addTranscriptText(x + 16, yy, `Tools in this turn (${related.length})`, 11, '#ffd54a').setOrigin(0, 0);
+    yy += 24;
+    if (related.length === 0) {
+      this.addTranscriptText(x + 16, yy, 'No tool rows in the retained call window.', 10, theme.muted).setOrigin(0, 0);
+      return;
+    }
+    for (const call of related.slice(0, 6)) {
+      const color = call.success ? categoryColor(call.category) : 0xff5252;
+      this.overlay.fillStyle(color, 0.16);
+      this.overlay.fillRoundedRect(x + 16, yy - 4, w - 32, 22, 5);
+      this.addTranscriptText(x + 28, yy, truncate(call.tool, 30), 10, theme.text).setOrigin(0, 0);
+      this.addTranscriptText(x + w - 24, yy, call.success ? formatDuration(call.duration_ms ?? 0) : 'failed', 9, theme.muted).setOrigin(1, 0);
+      yy += 26;
+    }
+  }
+
+  private addWrappedTranscriptText(x: number, y: number, text: string, width: number, size: number, color: string) {
+    const obj = this.add.text(x, y, text, {
+      fontFamily: '"Press Start 2P", monospace',
+      fontSize: `${size}px`,
+      color,
+      lineSpacing: 6,
+      wordWrap: { width, useAdvancedWrap: true },
+      strokeThickness: 0,
+    }).setDepth(51);
+    this.transcriptTextObjects.push(obj);
+    return obj;
   }
 
   /// Renders the transcript overlay's scrollbar (up arrow, track, thumb,
@@ -2056,11 +2477,13 @@ export class MissionControlScene extends Phaser.Scene {
     // Track
     g.fillStyle(0x1a2448, 0.5);
     g.fillRoundedRect(sbX, sbTrackY, scrollbarW, sbTrackH, 4);
+    this.transcriptScrollTrackRect = { x: sbX, y: sbTrackY, w: scrollbarW, h: sbTrackH };
     // Thumb — height proportional to viewport coverage, y mapped to scroll fraction.
     const thumbH = Math.max(20, sbTrackH * (maxRows / rowCount));
     const thumbY = sbTrackY + (sbTrackH - thumbH) * (offset / Math.max(1, maxOffset));
     g.fillStyle(cssToHex('#a5b1d8'), 0.85);
     g.fillRoundedRect(sbX + 2, thumbY, scrollbarW - 4, thumbH, 3);
+    this.transcriptScrollThumbRect = { x: sbX + 2, y: thumbY, w: scrollbarW - 4, h: thumbH };
     // Down arrow button
     const downY = sbTrackY + sbTrackH + 2;
     g.fillStyle(0x1a2448, 0.95);
@@ -2218,6 +2641,130 @@ export class MissionControlScene extends Phaser.Scene {
     this.addText(x + 24, y + 27, title, 14, titleColor).setOrigin(0, 0.5);
   }
 
+  private publishDashboardView() {
+    if (!window.__cmcRenderDashboard || !this.layout) return;
+    const layout = this.layout;
+    const compact = layout.compact;
+    const sessionOptions = this.getSessionPickerOptions();
+    const activeOptions = sessionOptions.filter(({ session }) => session.is_active);
+    const pickerOptions = (activeOptions.length > 0 ? activeOptions : sessionOptions.slice(0, 1)).slice(0, 5);
+    this.sessionPickerRows = pickerOptions.map(({ session, index }, i) => ({
+      id: session.id,
+      index,
+      title: session.title || session.id,
+      status: session.status,
+      isActive: session.is_active,
+      selected: index === this.selectedSessionIndex,
+      shortId: session.id.length > 8 ? session.id.slice(0, 8) : session.id,
+      x: layout.rightX + 18,
+      y: layout.topY + 80 + i * 30 - 4,
+      w: layout.rightW - 36,
+      h: 26,
+    }));
+    const feedY = layout.topY + layout.sessionH + (compact ? 14 : 22);
+    const feedH = Math.max(140, layout.bottomY - feedY - 16);
+    const visibleLog = this.eventLog.slice(0, this.replayCursor);
+    const nowMs = Date.now();
+    const feed = visibleLog
+      .slice(-30)
+      .reverse()
+      .map(event => ({ event, ageS: eventAgeSeconds(event.timestamp, nowMs) }))
+      .filter(({ ageS }) => ageS <= 300)
+      .map(({ event, ageS }) => ({
+        label: feedLabel(event),
+        age: `${formatAge(ageS)} ago`,
+        category: event.category,
+        success: event.success,
+      }));
+    const quarter = this.activeInspectedQuarter();
+    const quarterStats = quarter ? this.computeQuarterStats(quarter.key) : null;
+    const quarterSessions = quarter
+      ? this.activity.sessions.filter(s => this.pickQuarterForSession(s).key === quarter.key)
+      : [];
+    const flagged = quarter
+      ? quarterSessions.filter(quarter.key === 'terminal'
+          ? (s: CopilotSessionSummary) => s.status === 'needs-attention'
+          : errorOrReview)
+      : [];
+    const quarterFooter = quarter && flagged.length > 0
+      ? `! ${truncate(flagged[0].title || flagged[0].id, 28)} — ${flagged[0].last_tool || 'tool'} failed ${formatAge(flagged[0].stale_seconds)} ago${flagged.length > 1 ? ` (+${flagged.length - 1} more)` : ''}`
+      : quarterSessions.length > 0
+        ? `${quarterSessions.length} ${quarterSessions.length === 1 ? 'session' : 'sessions'} routed here · ${quarterSessions.filter(s => s.is_active).length} active`
+        : '';
+    const work = workMix(this.activity);
+    const total = this.eventLog.length;
+    const cursor = this.replayCursor;
+    const atLive = this.isAtLive();
+    const replayStatus = total === 0
+      ? 'waiting for events'
+      : atLive
+        ? `${cursor} / ${total} · live`
+        : this.replayPaused
+          ? `${cursor} / ${total} · paused`
+          : `${cursor} / ${total} · replaying`;
+    window.__cmcRenderDashboard({
+      panelsHidden: this.panelsHidden,
+      layout: {
+        leftX: layout.leftX,
+        topY: layout.topY,
+        panelW: layout.panelW,
+        rightX: layout.rightX,
+        rightW: layout.rightW,
+        sessionH: layout.sessionH,
+        insightH: layout.insightH,
+        feedY,
+        feedH,
+        bottomX: layout.inspectorX,
+        bottomY: layout.bottomY,
+        bottomW: layout.inspectorW,
+        bottomH: layout.bottomH,
+        replayX: layout.leftX,
+        replayY: layout.replayY,
+        replayW: W - layout.leftX * 2,
+        replayH: layout.replayH,
+      },
+      summary: {
+        cards: this.insightCards,
+        workMix: [
+          { label: 'Read', value: work.read, category: 'library' },
+          { label: 'Edit', value: work.write, category: 'forge' },
+          { label: 'Cmd', value: work.command, category: 'terminal' },
+          { label: 'Web', value: work.web, category: 'signal' },
+          { label: 'Agent', value: work.task, category: 'delegates' },
+          { label: 'MCP', value: work.mcp, category: 'mcp' },
+        ],
+      },
+      sessions: {
+        header: activeOptions.length > 0 ? `Running sessions (${activeOptions.length})` : 'Recent sessions (none active)',
+        rows: this.sessionPickerRows,
+        idleCount: Math.max(0, sessionOptions.length - pickerOptions.length),
+        selected: this.selectedSession,
+      },
+      feed: {
+        title: this.isAtLive() ? 'Activity Feed' : 'Activity Feed · replay view',
+        rows: feed,
+        empty: this.activity.available
+          ? 'No recent Copilot events found. Start a Copilot CLI session and this mission control will wake up.'
+          : 'Copilot CLI was not detected. Install or run Copilot CLI to populate this mission.',
+      },
+      quarter: quarter ? {
+        title: quarter.short,
+        countLine: `${quarter.count} recent ${quarter.short.toLowerCase()} signals`,
+        line: quarterStats?.line ?? '',
+        toolList: quarterStats?.toolList ?? '',
+        footer: quarterFooter,
+        footerAlert: flagged.length > 0,
+      } : null,
+      replay: {
+        paused: this.replayPaused,
+        atLive,
+        cursor,
+        total,
+        status: replayStatus,
+      },
+    });
+  }
+
   private addText(x: number, y: number, text: string, size: number, color: string) {
     const obj = this.add.text(x, y, text, {
       fontFamily: '"Press Start 2P", monospace',
@@ -2323,8 +2870,10 @@ export class MissionControlScene extends Phaser.Scene {
         const lastSeen = this.turnEndSeen.get(event.session_id);
         if (lastSeen !== event.timestamp) {
           this.turnEndSeen.set(event.session_id, event.timestamp);
-          this.playChime('turn-end');
-          this.maybeNotify(`Copilot finished — ${event.session_id}`, 'Open Mission Control to review the results.');
+          if (this.bootstrapCompleted) {
+            this.playChime('turn-end');
+            this.maybeNotify(`Copilot finished — ${event.session_id}`, 'Open Mission Control to review the results.');
+          }
         }
       }
     }
@@ -2402,7 +2951,7 @@ export class MissionControlScene extends Phaser.Scene {
     if (typeof Notification === 'undefined') return;
     const fire = () => {
       try {
-        new Notification(title, { body, tag: tag ?? 'mission-control', silent: false });
+        new Notification(title, { body, tag: tag ?? 'mission-control', silent: true });
       } catch { /* ignore */ }
     };
     if (Notification.permission === 'granted') {
@@ -2412,52 +2961,9 @@ export class MissionControlScene extends Phaser.Scene {
     }
   }
 
-  /// Synthesize a short bell tone (turn-end) or sharper triple-pulse
-  /// (attention) via the Web Audio API. Cached AudioContext is reused
-  /// across sessions to keep the latency low. Silenced for the
-  /// Playwright fixture so test runs stay quiet, respects the global
-  /// HUD mute toggle stored in localStorage by hud.js, and self-limits
-  /// to a single chime per app launch — recurring bells get annoying
-  /// for a passive monitor that's left open all day.
-  private playChime(variant: 'turn-end' | 'attention') {
-    if (this.activity.source === 'playwright-fixture') return;
-    if (isHudMuted()) return;
-    if (this.chimePlayedThisSession) return;
-    this.chimePlayedThisSession = true;
-    try {
-      const Ctor: any = (window as any).AudioContext ?? (window as any).webkitAudioContext;
-      if (!Ctor) return;
-      if (!this.audioCtx) this.audioCtx = new Ctor();
-      const ctx = this.audioCtx!;
-      const now = ctx.currentTime;
-      const tones: { freq: number; start: number; dur: number }[] = variant === 'attention'
-        ? [
-            { freq: 1320, start: 0, dur: 0.12 },
-            { freq: 1320, start: 0.16, dur: 0.12 },
-            { freq: 1760, start: 0.32, dur: 0.18 },
-          ]
-        : [
-            { freq: 880, start: 0, dur: 0.18 },
-            { freq: 1320, start: 0.06, dur: 0.22 },
-          ];
-      // 25% quieter than the original 0.18 peak — the chimes were a
-      // bit hot for a passive monitoring panel.
-      const peakGain = 0.135;
-      for (const tone of tones) {
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.type = 'sine';
-        osc.frequency.value = tone.freq;
-        const start = now + tone.start;
-        gain.gain.setValueAtTime(0, start);
-        gain.gain.linearRampToValueAtTime(peakGain, start + 0.01);
-        gain.gain.exponentialRampToValueAtTime(0.001, start + tone.dur);
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.start(start);
-        osc.stop(start + tone.dur + 0.05);
-      }
-    } catch { /* ignore */ }
+  private playChime(_variant: 'turn-end' | 'attention') {
+    // Intentionally silent: Mission Control is a passive monitor and must
+    // never emit app-generated audio.
   }
 
   private isAtLive() {
@@ -2787,6 +3293,56 @@ export class MissionControlScene extends Phaser.Scene {
         this.transcriptOpen = false;
         savePref('transcriptOpen', false);
         this.renderActivity();
+        return;
+      }
+      if (this.hitRect(px, py, this.transcriptScrollThumbRect)) {
+        this.beginTranscriptScrollDrag(py);
+        return;
+      }
+      if (this.hitRect(px, py, this.transcriptScrollTrackRect)) {
+        this.jumpTranscriptScrollToPointer(py);
+        this.beginTranscriptScrollDrag(py);
+        return;
+      }
+      for (const rect of this.inspectorModeRects) {
+        if (this.hitRect(px, py, rect)) {
+          if (this.inspectorMode !== rect.mode) {
+            this.inspectorMode = rect.mode;
+            this.transcriptScrollOffset = 0;
+            this.renderTranscriptOnly();
+          }
+          return;
+        }
+      }
+      for (const rect of this.inspectorTabRects) {
+        if (this.hitRect(px, py, rect)) {
+          if (this.inspectorTab !== rect.tab) {
+            this.inspectorTab = rect.tab;
+            this.selectedToolCallKey = null;
+            this.transcriptScrollOffset = 0;
+            this.renderTranscriptOnly();
+          }
+          return;
+        }
+      }
+      for (const rect of this.inspectorRowRects) {
+        if (this.hitRect(px, py, rect)) {
+          if (rect.kind === 'tools') {
+            this.selectedToolCallKey = rect.id;
+          } else {
+            this.selectedTurnId = rect.id;
+          }
+          this.renderTranscriptOnly();
+          return;
+        }
+      }
+      if (this.hitRect(px, py, this.transcriptScrollUpRect)) {
+        this.adjustTranscriptScroll(-3);
+        return;
+      }
+      if (this.hitRect(px, py, this.transcriptScrollDownRect)) {
+        this.adjustTranscriptScroll(3);
+        return;
       }
       return;
     }
@@ -2815,27 +3371,57 @@ export class MissionControlScene extends Phaser.Scene {
       return;
     }
     if (this.hitRect(px, py, this.transcriptToggleRect)) {
+      if (this.selectedSession && window.__cmcOpenInspector?.(this.selectedSession)) {
+        this.transcriptOpen = false;
+        savePref('transcriptOpen', false);
+        return;
+      }
       this.transcriptOpen = !this.transcriptOpen;
       this.transcriptScrollOffset = 0;
       savePref('transcriptOpen', this.transcriptOpen);
       this.renderActivity();
       return;
     }
-    if (this.transcriptOpen) {
-      if (this.hitRect(px, py, this.transcriptScrollUpRect)) {
-        this.adjustTranscriptScroll(-3);
-        return;
-      }
-      if (this.hitRect(px, py, this.transcriptScrollDownRect)) {
-        this.adjustTranscriptScroll(3);
-        return;
-      }
-    }
     // Clicking a quarter is intentionally a no-op now: sticky last-hover
     // already keeps the inspector showing whatever the user pointed at,
     // so the previous "click to pin / click to unpin" model was redundant
     // and prone to surprise jumps when the panel snapped back to a stale
     // pinned quarter.
+  }
+
+  private handleScenePointerMove(pointer: any) {
+    if (!this.transcriptScrollDrag) return;
+    const drag = this.transcriptScrollDrag;
+    if (drag.maxOffset <= 0 || drag.travelPx <= 0) return;
+    const thumbTop = pointer.y - drag.thumbGrabY;
+    const rows = ((thumbTop - drag.trackY) / drag.travelPx) * drag.maxOffset;
+    this.setTranscriptScrollOffset(rows, drag.maxOffset);
+  }
+
+  private handleScenePointerUp() {
+    this.transcriptScrollDrag = null;
+  }
+
+  private beginTranscriptScrollDrag(pointerY: number) {
+    const maxOffset = Math.max(0, this.transcriptRowCount - this.transcriptRowsVisible);
+    const track = this.transcriptScrollTrackRect;
+    const thumb = this.transcriptScrollThumbRect;
+    if (!track || !thumb || maxOffset <= 0) return;
+    this.transcriptScrollDrag = {
+      maxOffset,
+      travelPx: Math.max(1, track.h - thumb.h),
+      trackY: track.y,
+      thumbGrabY: Math.max(0, Math.min(thumb.h, pointerY - thumb.y)),
+    };
+  }
+
+  private jumpTranscriptScrollToPointer(pointerY: number) {
+    const maxOffset = Math.max(0, this.transcriptRowCount - this.transcriptRowsVisible);
+    const track = this.transcriptScrollTrackRect;
+    const thumb = this.transcriptScrollThumbRect;
+    if (!track || !thumb || maxOffset <= 0) return;
+    const thumbCenterOffset = Math.max(0, Math.min(track.h - thumb.h, pointerY - track.y - thumb.h / 2));
+    this.setTranscriptScrollOffset((thumbCenterOffset / Math.max(1, track.h - thumb.h)) * maxOffset, maxOffset);
   }
 
   private openSelectedSessionInEditor() {
@@ -2901,6 +3487,14 @@ export class MissionControlScene extends Phaser.Scene {
     this.openInEditorRect = null;
     this.transcriptToggleRect = null;
     this.transcriptCloseRect = null;
+    this.transcriptScrollUpRect = null;
+    this.transcriptScrollDownRect = null;
+    this.transcriptScrollTrackRect = null;
+    this.transcriptScrollThumbRect = null;
+    this.transcriptScrollDrag = null;
+    this.inspectorModeRects = [];
+    this.inspectorTabRects = [];
+    this.inspectorRowRects = [];
   }
 }
 
@@ -3176,7 +3770,11 @@ function normalizeActivity(activity: CopilotActivity): CopilotActivity {
   return {
     ...createEmptyActivity(),
     ...activity,
-    sessions: activity.sessions ?? [],
+    sessions: (activity.sessions ?? []).map(session => ({
+      ...session,
+      recent_tool_calls: session.recent_tool_calls ?? [],
+      recent_turns: session.recent_turns ?? [],
+    })),
     tools: activity.tools ?? [],
     recent_events: activity.recent_events ?? [],
     alerts: activity.alerts ?? [],
@@ -3213,6 +3811,41 @@ function errorOrReview(session: CopilotSessionSummary) {
 
 function eventKey(event: CopilotEventSummary) {
   return `${event.timestamp}|${event.session_id}|${event.kind}|${event.tool}|${event.category}|${event.success}`;
+}
+
+function toolCallKey(call: SessionToolCall) {
+  return call.call_id || `${call.timestamp}|${call.tool}|${call.category}`;
+}
+
+function callKindLabel(call: SessionToolCall) {
+  if (call.category === 'mcp') return 'MCP tool';
+  if (call.category === 'skills') return 'Skill';
+  if (call.category === 'delegates') return 'Sub-agent';
+  if (call.category === 'terminal') return 'Command';
+  if (call.category === 'signal') return 'Web/docs';
+  if (call.category === 'forge') return 'Edit';
+  if (call.category === 'library') return 'Read/search';
+  if (call.category === 'court') return 'Control';
+  return call.category || 'Tool';
+}
+
+function turnDurationLabel(turn: SessionTurnSummary) {
+  if (typeof turn.duration_ms === 'number') return formatDuration(turn.duration_ms);
+  if (turn.status === 'running') return 'running';
+  return 'unknown';
+}
+
+function turnToolList(turn: SessionTurnSummary, session: CopilotSessionSummary) {
+  const fromTurn = (turn.tools ?? []).filter(Boolean);
+  const related = fromTurn.length > 0
+    ? fromTurn
+    : (session.recent_tool_calls ?? [])
+        .filter(call => call.turn_id === turn.id)
+        .map(call => call.tool);
+  if (related.length === 0) return 'none retained';
+  const visible = related.slice(0, 8).join(', ');
+  const hidden = related.length > 8 ? ` +${related.length - 8} more` : '';
+  return `${visible}${hidden}`;
 }
 
 function quarterKeyForEvent(event: CopilotEventSummary): MissionCategory | null {
@@ -3428,16 +4061,4 @@ function cssToHex(css: string): number {
   if (s.length !== 6) return 0xffffff;
   const n = parseInt(s, 16);
   return Number.isFinite(n) ? n : 0xffffff;
-}
-
-/// Mirror the mute flag that hud.js stores in localStorage. Mission Control
-/// chimes use a separate Web Audio context (not Phaser's master mixer),
-/// so the HUD's mute button doesn't reach them directly — this helper
-/// gives them a single source of truth to consult.
-function isHudMuted(): boolean {
-  try {
-    return window.localStorage?.getItem('cmc_muted') === '1';
-  } catch {
-    return false;
-  }
 }

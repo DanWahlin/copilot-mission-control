@@ -81,18 +81,7 @@ code {
 
 /* ---------- Scanlines (subtle CRT effect, fits pixel-art) ---------- */
 .scanlines {
-  position: fixed;
-  inset: 0;
-  z-index: 9999;
-  pointer-events: none;
-  background: repeating-linear-gradient(
-    0deg,
-    transparent,
-    transparent 2px,
-    rgba(0,0,0,0.035) 2px,
-    rgba(0,0,0,0.035) 4px
-  );
-  mix-blend-mode: multiply;
+  display: none;
 }
 
 /* ---------- Navbar ---------- */
@@ -328,8 +317,8 @@ code {
   height: auto;
   display: block;
   filter: drop-shadow(0 0 40px rgba(95,212,255,0.22)) drop-shadow(0 0 90px rgba(255,138,60,0.12));
-  -webkit-mask-image: radial-gradient(ellipse 62% 62% at 48% 48%, black 67%, transparent 84%);
-  mask-image: radial-gradient(ellipse 62% 62% at 48% 48%, black 67%, transparent 84%);
+  -webkit-mask-image: radial-gradient(ellipse 78% 68% at 50% 50%, black 62%, transparent 88%);
+  mask-image: radial-gradient(ellipse 78% 68% at 50% 50%, black 62%, transparent 88%);
 }
 
 @keyframes bannerFloat {

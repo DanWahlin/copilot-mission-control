@@ -16,7 +16,7 @@
       color: #e8ecff;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, 'Helvetica Neue', sans-serif;
     }
-    body.theme-light, body.theme-light html { background: #eef2fb; color: #1a2240; }
+    body.theme-light, body.theme-light html { background: #f4f7fb; color: #1f2937; }
 
     /* Top navigation bar — app brand, live ops status, and the theme
        toggle. The ops chip + recommendation + alerts that used to live
@@ -45,16 +45,15 @@
       z-index: 10;
     }
     body.theme-light #topbar {
-      background: linear-gradient(180deg, #ffffff 0%, #f3f6fd 60%, #e5ecf8 100%);
-      border-bottom: 2px solid #d8a200;
+      background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+      border-bottom: 1px solid #cbd5e1;
       box-shadow:
-        0 1px 0 rgba(216, 162, 0, 0.18) inset,
-        0 6px 14px rgba(15, 30, 70, 0.10);
+        0 1px 0 rgba(255, 255, 255, 0.9) inset,
+        0 6px 18px rgba(15, 23, 42, 0.08);
     }
     #topbar .brand {
       display: inline-flex;
       align-items: center;
-      gap: 8px;
       color: #ffd54a;
       font-weight: 700;
       text-transform: uppercase;
@@ -62,16 +61,15 @@
       margin-right: auto;
     }
     body.theme-light #topbar .brand {
-      color: #8a5d00;
+      color: #1e3a5f;
       text-shadow: none;
     }
-    #topbar .brand .crown { font-size: 18px; filter: drop-shadow(0 1px 1px rgba(0,0,0,0.6)); }
     #topbar .divider {
       width: 1px;
       height: 18px;
       background: rgba(255, 213, 74, 0.35);
     }
-    body.theme-light #topbar .divider { background: rgba(138, 93, 0, 0.35); }
+    body.theme-light #topbar .divider { background: rgba(100, 116, 139, 0.35); }
 
     /* Live ops chip — status word colored by attention severity. */
     #ops-chip {
@@ -89,7 +87,7 @@
     #ops-chip.watch  { background: rgba(255, 213, 74, 0.20); color: #ffd54a; border: 1px solid rgba(255,213,74,0.65); }
     #ops-chip.review { background: rgba(255, 82, 82, 0.22);  color: #ff8a8a; border: 1px solid rgba(255,82,82,0.7); }
     body.theme-light #ops-chip.calm   { background: rgba(34, 156, 78, 0.18);  color: #1f7a3a;  border: 1px solid rgba(34,156,78,0.55); }
-    body.theme-light #ops-chip.watch  { background: rgba(184, 134, 11, 0.22); color: #8a5d00;  border: 1px solid rgba(184,134,11,0.65); }
+    body.theme-light #ops-chip.watch  { background: #fff7ed; color: #9a3412;  border: 1px solid #fed7aa; }
     body.theme-light #ops-chip.review { background: rgba(190, 28, 28, 0.18);  color: #a01818;  border: 1px solid rgba(190,28,28,0.65); }
 
     /* Recommendation ticker — single-line truncated to fit available
@@ -106,8 +104,8 @@
       text-overflow: ellipsis;
     }
     #ops-rec.muted { color: #93a4d8; font-style: italic; }
-    body.theme-light #ops-rec { color: #1a2240; }
-    body.theme-light #ops-rec.muted { color: #5b6a8f; }
+    body.theme-light #ops-rec { color: #334155; }
+    body.theme-light #ops-rec.muted { color: #64748b; }
 
     /* Alert badge — only shown when activity.alerts has entries. */
     #ops-alert {
@@ -148,12 +146,12 @@
       border-color: rgba(255, 213, 74, 0.5);
     }
     body.theme-light #topbar button {
-      border-color: rgba(15, 30, 70, 0.18);
-      color: #1a2240;
+      border-color: #cbd5e1;
+      color: #334155;
     }
     body.theme-light #topbar button:hover {
-      background: rgba(15, 30, 70, 0.06);
-      border-color: rgba(138, 93, 0, 0.6);
+      background: #f1f5f9;
+      border-color: #94a3b8;
     }
     /* Panels-toggle button — collapse/expand side panels for a focused
        mission-only view. Sits left of the theme button. Uses inline SVG
@@ -164,7 +162,7 @@
       align-items: center;
       justify-content: center;
       width: 36px;
-      height: 32px;
+      height: 28px;
       padding: 0;
     }
     #panels-btn svg {
@@ -185,6 +183,12 @@
        light). The button bg mirrors that target so the button reads as
        a preview of where you'll end up. */
     #theme-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 36px;
+      height: 28px;
+      padding: 0;
       background: linear-gradient(180deg, #f6f8fd 0%, #e1e7f3 100%);
       border-color: rgba(15, 30, 70, 0.18);
       color: #1a2240;
@@ -194,13 +198,13 @@
       border-color: rgba(138, 93, 0, 0.6);
     }
     body.theme-light #theme-btn {
-      background: linear-gradient(180deg, #1d2a55 0%, #0d1430 100%);
-      border-color: rgba(255, 213, 74, 0.45);
-      color: #ffd54a;
+      background: linear-gradient(180deg, #1e293b 0%, #0f172a 100%);
+      border-color: #334155;
+      color: #f8fafc;
     }
     body.theme-light #theme-btn:hover {
-      background: linear-gradient(180deg, #25356c 0%, #131b3d 100%);
-      border-color: rgba(255, 213, 74, 0.85);
+      background: linear-gradient(180deg, #334155 0%, #111827 100%);
+      border-color: #475569;
     }
 
     /* Active model chip — shows the model id (e.g. "gpt-5.5") for the
@@ -226,9 +230,279 @@
     }
     #model-chip.empty { display: none; }
     body.theme-light #model-chip {
-      background: rgba(184, 134, 11, 0.14);
-      color: #8a5d00;
-      border-color: rgba(184, 134, 11, 0.5);
+      background: #f8fafc;
+      color: #334155;
+      border-color: #cbd5e1;
+    }
+
+    /* HTML inspector overlay. Phaser still owns the mission map; this
+       dialog uses native DOM controls for the high-density drill-down so
+       scrolling, wrapping, selection, and keyboard close behave like a
+       normal desktop UI. */
+    #inspector-overlay {
+      position: fixed;
+      inset: 40px 0 0 0;
+      z-index: 30;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 28px;
+      background: rgba(0, 0, 0, 0.58);
+      box-sizing: border-box;
+    }
+    #inspector-overlay.visible { display: flex; }
+    #inspector-dialog {
+      width: min(1120px, calc(100vw - 56px));
+      height: min(700px, calc(100vh - 96px));
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+      gap: 14px;
+      background: #0c1430;
+      color: #e8ecff;
+      border: 2px solid #ffd54a;
+      border-radius: 16px;
+      box-shadow: 0 24px 70px rgba(0, 0, 0, 0.62);
+      padding: 20px;
+      box-sizing: border-box;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    body.theme-light #inspector-dialog {
+      background: #ffffff;
+      color: #1f2937;
+      border-color: #cbd5e1;
+      box-shadow: 0 24px 70px rgba(15, 23, 42, 0.18);
+    }
+    .inspector-header {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 16px;
+      align-items: start;
+    }
+    .inspector-title {
+      margin: 0 0 6px 0;
+      color: #ffd54a;
+      font-size: 18px;
+      letter-spacing: 0.02em;
+    }
+    body.theme-light .inspector-title { color: #1e3a5f; }
+    .inspector-subtitle {
+      color: #93a4d8;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    body.theme-light .inspector-subtitle { color: #64748b; }
+    .inspector-close {
+      width: 34px;
+      height: 30px;
+      border-radius: 8px;
+      border: 1px solid rgba(255, 122, 122, 0.8);
+      background: #1a2448;
+      color: #ff8a8a;
+      cursor: pointer;
+      font-size: 18px;
+      line-height: 1;
+    }
+    body.theme-light .inspector-close {
+      background: #fff4f4;
+      color: #a01818;
+      border-color: rgba(160, 24, 24, 0.55);
+    }
+    .inspector-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    .inspector-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-left: 12px;
+    }
+    .inspector-pill {
+      border: 1px solid #4566c7;
+      background: #121b3b;
+      color: #cbd6ff;
+      border-radius: 10px;
+      padding: 8px 14px;
+      font: inherit;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .inspector-pill.active {
+      border-color: #ffd54a;
+      color: #ffd54a;
+      background: #25346c;
+      box-shadow: inset 0 0 0 1px rgba(255, 213, 74, 0.35);
+    }
+    body.theme-light .inspector-pill {
+      background: #f8fafc;
+      color: #334155;
+      border-color: #cbd5e1;
+    }
+    body.theme-light .inspector-pill.active {
+      background: #e0ecff;
+      color: #1d4ed8;
+      border-color: #93c5fd;
+    }
+    .inspector-body {
+      min-height: 0;
+      display: grid;
+      grid-template-columns: minmax(320px, 1fr) minmax(360px, 0.95fr);
+      gap: 18px;
+    }
+    .inspector-list,
+    .inspector-detail {
+      min-height: 0;
+      overflow: auto;
+      scrollbar-gutter: stable;
+      scrollbar-width: auto;
+      scrollbar-color: #7f97ef #07102b;
+      border: 1px solid #31437a;
+      border-radius: 12px;
+      background: rgba(16, 24, 51, 0.88);
+      padding: 12px;
+      box-sizing: border-box;
+    }
+    .inspector-list::-webkit-scrollbar,
+    .inspector-detail::-webkit-scrollbar {
+      width: 16px;
+      height: 16px;
+    }
+    .inspector-list::-webkit-scrollbar-track,
+    .inspector-detail::-webkit-scrollbar-track {
+      background: #07102b;
+      border-left: 1px solid #31437a;
+      border-radius: 10px;
+    }
+    .inspector-list::-webkit-scrollbar-thumb,
+    .inspector-detail::-webkit-scrollbar-thumb {
+      background: linear-gradient(180deg, #9fb0ff 0%, #6076d8 100%);
+      border: 3px solid #07102b;
+      border-radius: 999px;
+      min-height: 44px;
+    }
+    .inspector-list::-webkit-scrollbar-thumb:hover,
+    .inspector-detail::-webkit-scrollbar-thumb:hover {
+      background: linear-gradient(180deg, #c3ceff 0%, #7f97ef 100%);
+    }
+    body.theme-light .inspector-list,
+    body.theme-light .inspector-detail {
+      background: #f7f9fd;
+      border-color: #d6dee9;
+      scrollbar-color: #6f83cc #e0e6f3;
+    }
+    body.theme-light .inspector-list::-webkit-scrollbar-track,
+    body.theme-light .inspector-detail::-webkit-scrollbar-track {
+      background: #e0e6f3;
+      border-left-color: #d6dee9;
+    }
+    body.theme-light .inspector-list::-webkit-scrollbar-thumb,
+    body.theme-light .inspector-detail::-webkit-scrollbar-thumb {
+      background: linear-gradient(180deg, #8ca0e6 0%, #5f73bd 100%);
+      border-color: #e0e6f3;
+    }
+    .inspector-row {
+      width: 100%;
+      text-align: left;
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 12px;
+      align-items: start;
+      border: 1px solid rgba(127, 151, 239, 0.34);
+      border-radius: 10px;
+      background: rgba(97, 214, 255, 0.10);
+      color: inherit;
+      padding: 12px;
+      margin: 0 0 10px 0;
+      cursor: pointer;
+      font: inherit;
+    }
+    .inspector-row.active {
+      border-color: #ffd54a;
+      background: rgba(255, 213, 74, 0.16);
+    }
+    .inspector-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      margin-top: 4px;
+      background: #61d6ff;
+    }
+    .inspector-row.failed .inspector-dot { background: #ff5252; }
+    .inspector-row-main {
+      min-width: 0;
+    }
+    .inspector-row-title {
+      display: block;
+      font-weight: 700;
+      color: #f5f7ff;
+      overflow-wrap: anywhere;
+    }
+    body.theme-light .inspector-row-title { color: #1f2937; }
+    .inspector-row-sub,
+    .inspector-row-meta,
+    .inspector-empty {
+      color: #93a4d8;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    body.theme-light .inspector-row-sub,
+    body.theme-light .inspector-row-meta,
+    body.theme-light .inspector-empty { color: #64748b; }
+    .inspector-row-meta {
+      white-space: nowrap;
+      text-align: right;
+    }
+    .inspector-detail h3 {
+      margin: 0 0 14px 0;
+      color: #ffd54a;
+      font-size: 16px;
+    }
+    body.theme-light .inspector-detail h3 { color: #1e3a5f; }
+    .inspector-kv {
+      display: grid;
+      grid-template-columns: minmax(90px, 130px) 1fr;
+      gap: 8px 14px;
+      margin-bottom: 18px;
+      font-size: 13px;
+      line-height: 1.55;
+    }
+    .inspector-kv dt {
+      color: #93a4d8;
+    }
+    .inspector-kv dd {
+      margin: 0;
+      overflow-wrap: anywhere;
+    }
+    body.theme-light .inspector-kv dt { color: #64748b; }
+    .inspector-related-title {
+      color: #ffd54a;
+      font-weight: 700;
+      margin: 18px 0 10px;
+    }
+    body.theme-light .inspector-related-title { color: #1e3a5f; }
+    .inspector-related {
+      display: grid;
+      gap: 8px;
+    }
+    .inspector-related-item {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: rgba(96, 255, 154, 0.12);
+      border: 1px solid rgba(96, 255, 154, 0.22);
+      font-size: 12px;
+    }
+    .inspector-related-item.failed {
+      background: rgba(255, 82, 82, 0.12);
+      border-color: rgba(255, 82, 82, 0.25);
+    }
+    @media (max-width: 900px) {
+      #inspector-dialog { height: min(760px, calc(100vh - 80px)); }
+      .inspector-body { grid-template-columns: 1fr; }
     }
 
     /* The Phaser canvas mounts inside #game and fills the area below
@@ -242,19 +516,219 @@
       bottom: 0;
       background: #0a0e22;
     }
-    body.theme-light #game { background: #eef2fb; }
+    body.theme-light #game { background: #f4f7fb; }
     canvas { display: block; }
+    #dashboard-overlay {
+      position: fixed;
+      top: 40px;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 6;
+      pointer-events: none;
+      font-family: '"Press Start 2P"', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .cmc-panel {
+      position: absolute;
+      pointer-events: auto;
+      box-sizing: border-box;
+      background: linear-gradient(180deg, rgba(16, 26, 58, 0.94), rgba(10, 16, 36, 0.94));
+      border: 2px solid rgba(28, 39, 80, 0.9);
+      border-radius: 16px;
+      box-shadow: 6px 7px 0 rgba(2, 7, 19, 0.52);
+      color: #e8ecff;
+      padding: 48px 20px 16px;
+      overflow: hidden;
+    }
+    #dom-session {
+      padding-bottom: 54px;
+    }
+    body.theme-light .cmc-panel {
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.98));
+      border-color: #d6dee9;
+      box-shadow: 0 12px 28px rgba(15, 23, 42, 0.08);
+      color: #1f2937;
+    }
+    .cmc-panel.hidden { display: none; }
+    .cmc-panel-body {
+      height: 100%;
+      min-height: 0;
+      box-sizing: border-box;
+    }
+    .cmc-panel-title {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 38px;
+      display: flex;
+      align-items: center;
+      padding: 0 14px;
+      box-sizing: border-box;
+      border-radius: 14px 14px 0 0;
+      background: linear-gradient(180deg, #25346c, #1a2448);
+      color: #ffd54a;
+      font-size: 14px;
+    }
+    body.theme-light .cmc-panel-title {
+      background: linear-gradient(180deg, #f8fafc 0%, #eef2f7 100%);
+      color: #1e3a5f;
+      border: 1px solid #cbd5e1;
+    }
+    #dom-summary .cmc-panel-body { display: block; }
+    .cmc-card-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px 10px;
+    }
+    .cmc-card {
+      min-height: 58px;
+      border-radius: 10px;
+      border: 1px solid rgba(49, 67, 122, 0.8);
+      background: rgba(16, 24, 51, 0.9);
+      padding: 10px 12px;
+    }
+    body.theme-light .cmc-card { background: #ffffff; border-color: #d6dee9; box-shadow: 0 4px 12px rgba(15, 23, 42, 0.04); }
+    .cmc-label, .cmc-muted { color: #93a4d8; }
+    body.theme-light .cmc-label, body.theme-light .cmc-muted { color: #64748b; }
+    .cmc-label { font-size: 12px; line-height: 1.4; }
+    .cmc-value { margin-top: 8px; font-size: 19px; line-height: 1.1; color: #e8ecff; }
+    body.theme-light .cmc-value { color: #1f2937; }
+    .cmc-sub { margin-top: 6px; font-size: 10px; color: #93a4d8; line-height: 1.3; }
+    .cmc-workmix { min-height: 0; margin-top: 28px; }
+    .cmc-workmix-title { font-size: 12px; margin-bottom: 8px; color: #93a4d8; }
+    .cmc-work-row { display: grid; grid-template-columns: 58px 1fr 34px; gap: 10px; align-items: center; margin: 6px 0; font-size: 11px; }
+    .cmc-bar { height: 10px; border-radius: 999px; background: #1a2448; overflow: hidden; }
+    .cmc-bar span { display: block; height: 100%; min-width: 12px; border-radius: 999px; background: var(--bar-color, #61d6ff); }
+    .cmc-session-list { display: grid; gap: 8px; margin-bottom: 14px; }
+    .cmc-session-row, .cmc-feed-row {
+      width: 100%;
+      border: 1px solid rgba(127, 151, 239, 0.44);
+      border-radius: 8px;
+      background: rgba(16, 24, 51, 0.82);
+      color: inherit;
+      padding: 7px 10px;
+      box-sizing: border-box;
+      font: inherit;
+      text-align: left;
+    }
+    .cmc-session-row { display: grid; grid-template-columns: 12px 1fr auto; gap: 10px; align-items: center; cursor: pointer; }
+    .cmc-session-row.selected { background: rgba(96, 255, 154, 0.20); border-color: rgba(96, 255, 154, 0.9); }
+    body.theme-light .cmc-session-row,
+    body.theme-light .cmc-feed-row {
+      background: #ffffff;
+      border-color: #d6dee9;
+    }
+    body.theme-light .cmc-session-row.selected {
+      background: #ecfdf5;
+      border-color: #86efac;
+    }
+    .cmc-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--dot, #60ff9a); }
+    .cmc-session-title { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .cmc-session-id { font-size: 10px; padding: 4px 7px; border-radius: 4px; background: rgba(2, 7, 19, 0.7); color: #e6ecf8; }
+    body.theme-light .cmc-session-id { background: #334155; color: #f8fafc; }
+    .cmc-detail-rows { display: grid; gap: 8px; margin: 10px 0 62px; font-size: 12px; line-height: 1.35; }
+    .cmc-actions { position: absolute; left: 22px; right: 22px; bottom: 10px; display: flex; gap: 8px; }
+    .cmc-button {
+      border: 1px solid rgba(165, 177, 216, 0.7);
+      background: #1a2448;
+      color: #a5b1d8;
+      border-radius: 6px;
+      padding: 8px 12px;
+      font: inherit;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .cmc-button.accent { color: #61d6ff; border-color: rgba(97, 214, 255, 0.7); }
+    body.theme-light .cmc-button {
+      background: #f8fafc;
+      color: #334155;
+      border-color: #cbd5e1;
+    }
+    body.theme-light .cmc-button.accent {
+      background: #eff6ff;
+      color: #1d4ed8;
+      border-color: #93c5fd;
+    }
+    #dom-feed .cmc-panel-body {
+      overflow-y: auto;
+      scrollbar-gutter: stable;
+      padding-right: 4px;
+      padding-bottom: 10px;
+    }
+    .cmc-feed-list { display: grid; gap: 8px; padding-bottom: 10px; }
+    .cmc-feed-row { display: grid; grid-template-columns: 12px 1fr auto; gap: 10px; align-items: center; font-size: 11px; min-height: 26px; }
+    #dom-quarter .cmc-panel-body {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding-bottom: 16px;
+      overflow-y: auto;
+      scrollbar-gutter: stable;
+    }
+    .cmc-quarter-line { font-size: 12px; line-height: 1.55; margin: 0; }
+    .cmc-quarter-tools { font-size: 11px; line-height: 1.45; margin-top: 2px; }
+    .cmc-quarter-footer { margin-top: auto; font-size: 11px; line-height: 1.4; }
+    .cmc-footer-alert { color: #ff8a8a; }
+    .cmc-footer-info { color: #7f97ef; }
+    #dom-replay { padding: 0; }
+    .cmc-replay-inner {
+      height: 100%;
+      display: grid;
+      grid-template-columns: 38px 1fr 86px;
+      gap: 14px;
+      align-items: center;
+      padding: 8px 14px;
+      box-sizing: border-box;
+    }
+    .cmc-replay-track { position: relative; height: 22px; cursor: pointer; }
+    .cmc-replay-rail { position: absolute; left: 0; right: 0; top: 6px; height: 10px; border-radius: 999px; background: #1a2448; overflow: hidden; }
+    .cmc-replay-fill { height: 100%; border-radius: 999px; background: #60ff9a; width: 0%; }
+    .cmc-replay-knob { position: absolute; top: -1px; width: 8px; height: 24px; background: #60ff9a; transform: translateX(-4px); }
+    .cmc-replay-status { position: absolute; left: 0; bottom: -10px; font-size: 9px; color: #60ff9a; }
+    body.theme-light .cmc-replay-rail { background: #dbe4ef; }
+    body.theme-light .cmc-replay-fill,
+    body.theme-light .cmc-replay-knob { background: #2563eb; }
+    body.theme-light .cmc-replay-status { color: #1d4ed8; }
   </style>
 </head>
 <body>
   <div id="topbar">
-    <span class="brand"><span class="crown">🛰️</span> Copilot Mission Control</span>
+    <span class="brand">Copilot Mission Control</span>
     <span id="model-chip" class="empty" title="Active model for the selected session"></span>
     <button id="panels-btn" type="button" title="Hide side panels for focus mode"></button>
     <button id="theme-btn" type="button" title="Toggle light/dark theme">🌙</button>
   </div>
 
   <div id="game"></div>
+  <div id="dashboard-overlay" aria-label="Mission Control dashboard">
+    <section id="dom-summary" class="cmc-panel"><div class="cmc-panel-title">Summary</div><div class="cmc-panel-body"></div></section>
+    <section id="dom-session" class="cmc-panel"><div class="cmc-panel-title">Selected Session</div><div class="cmc-panel-body"></div></section>
+    <section id="dom-feed" class="cmc-panel"><div class="cmc-panel-title">Activity Feed</div><div class="cmc-panel-body"></div></section>
+    <section id="dom-quarter" class="cmc-panel"><div class="cmc-panel-title">Sector</div><div class="cmc-panel-body"></div></section>
+    <section id="dom-replay" class="cmc-panel"></section>
+  </div>
+
+  <section id="inspector-overlay" aria-hidden="true">
+    <div id="inspector-dialog" role="dialog" aria-modal="true" aria-labelledby="inspector-title">
+      <div class="inspector-header">
+        <div>
+          <h2 id="inspector-title" class="inspector-title">Inspector</h2>
+          <div id="inspector-subtitle" class="inspector-subtitle"></div>
+        </div>
+        <button id="inspector-close" class="inspector-close" type="button" aria-label="Close inspector">×</button>
+      </div>
+      <div class="inspector-toolbar">
+        <button class="inspector-pill active" type="button" data-inspector-mode="tools">Tools</button>
+        <button class="inspector-pill" type="button" data-inspector-mode="turns">Turns</button>
+        <div id="inspector-tabs" class="inspector-tabs" aria-label="Tool filters"></div>
+      </div>
+      <div class="inspector-body">
+        <div id="inspector-list" class="inspector-list" tabindex="0"></div>
+        <div id="inspector-detail" class="inspector-detail"></div>
+      </div>
+    </div>
+  </section>
 
   <script src="./hud.js"></script>
   <script src="./phaser.min.js"></script>
