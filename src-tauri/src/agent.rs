@@ -840,6 +840,11 @@ fn summarize_events(
             // running session as needs-attention purely from tail
             // truncation, even when the live work is fine.
         } else if event_type == "assistant.message" {
+            // Copilot's `assistant.message` carries `outputTokens` per
+            // message but not `inputTokens` in practice — input token
+            // counts are reported at session.shutdown via tokenDetails
+            // (see below), so trying to accumulate them here would
+            // silently stay at zero anyway.
             if let Some(tokens) = value
                 .get("data")
                 .and_then(|data| data.get("outputTokens"))
@@ -847,18 +852,13 @@ fn summarize_events(
             {
                 summary.output_tokens += tokens;
             }
-            if let Some(tokens) = value
-                .get("data")
-                .and_then(|data| data.get("inputTokens"))
-                .and_then(|v| v.as_u64())
-            {
-                summary.input_tokens += tokens;
-            }
         } else if event_type == "session.compaction_complete" {
-            // Copilot doesn't emit input tokens per assistant.message,
-            // so accumulate the input tokens reported on each periodic
-            // compaction. This is the only running-total signal we get
-            // during a live session.
+            // `compactionTokensUsed.inputTokens` / `outputTokens` are
+            // the tokens consumed BY each compaction operation
+            // (~200 KTok per call), not a running total of the
+            // conversation — so summing them across N compactions
+            // legitimately accounts for "tokens the agent spent on
+            // self-compaction this session".
             if let Some(used) = value.get("data").and_then(|d| d.get("compactionTokensUsed")) {
                 if let Some(n) = used.get("inputTokens").and_then(|v| v.as_u64()) {
                     summary.input_tokens += n;
@@ -869,16 +869,28 @@ fn summarize_events(
             }
         } else if event_type == "session.shutdown" {
             // On shutdown Copilot emits the cumulative session totals.
-            // Use max() against any compaction-accumulated value so we
-            // don't double-count yet still report a non-zero figure.
+            // We deliberately EXCLUDE `cache_read.tokenCount` from the
+            // input total: cache reads are the cached prefix the model
+            // re-fetches on every turn, which can balloon into the
+            // hundreds of millions for a long session (one observed
+            // session reported 321M cache reads vs 125K fresh input
+            // and 10M cache writes). Including cache reads made the
+            // "Tokens · 24h" card report ~333M for a normal day of
+            // coding, which both visually overflowed the card and
+            // misrepresented actual model work — cache reads are
+            // billed at a tiny fraction of fresh input rates and the
+            // model doesn't process them from scratch.
+            //
+            // We DO include `cache_write` because cache writes are the
+            // model committing new content to cache and are billed at
+            // the same (or higher) rate as fresh input — they
+            // represent real work.
             if let Some(details) = value.get("data").and_then(|d| d.get("tokenDetails")) {
                 let fresh = details
                     .get("input").and_then(|v| v.get("tokenCount")).and_then(|v| v.as_u64()).unwrap_or(0);
-                let cache_read = details
-                    .get("cache_read").and_then(|v| v.get("tokenCount")).and_then(|v| v.as_u64()).unwrap_or(0);
                 let cache_write = details
                     .get("cache_write").and_then(|v| v.get("tokenCount")).and_then(|v| v.as_u64()).unwrap_or(0);
-                let total_in = fresh + cache_read + cache_write;
+                let total_in = fresh + cache_write;
                 if total_in > summary.input_tokens {
                     summary.input_tokens = total_in;
                 }
@@ -1468,6 +1480,62 @@ mod tests {
         assert_eq!(categorize_tool("manage_schedule", &allowlist), "court");
         assert_eq!(categorize_tool("ask_user", &allowlist), "court");
         assert_eq!(categorize_tool("report_intent", &allowlist), "court");
+    }
+
+    /// Regression: `session.shutdown` reports cumulative token counts
+    /// in a four-bucket `tokenDetails` block — fresh input, cache_read,
+    /// cache_write, and output. Including `cache_read` in the input
+    /// total ballooned the "Tokens · 24h" Summary card to ~333M for a
+    /// normal session (cache reads are the cached prefix the model
+    /// re-fetches every turn, billed at a tiny fraction of fresh-input
+    /// rates and not real new work). The fix sums fresh + cache_write
+    /// only; cache_read is intentionally dropped.
+    #[test]
+    fn shutdown_excludes_cache_read_from_input_tokens() {
+        use std::io::Write;
+        let mut path = std::env::temp_dir();
+        path.push("koa_test_shutdown_cache_read.jsonl");
+        {
+            let mut f = std::fs::File::create(&path).expect("create temp jsonl");
+            // One assistant.message (output tokens only) plus a
+            // shutdown with absurd cache_read to mirror the real bug.
+            writeln!(
+                f,
+                r#"{{"type":"assistant.message","timestamp":"2026-01-01T00:00:00Z","data":{{"outputTokens":1000}}}}"#
+            )
+            .unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"session.shutdown","timestamp":"2026-01-01T00:01:00Z","data":{{"tokenDetails":{{"input":{{"tokenCount":100000}},"cache_read":{{"tokenCount":1000000000}},"cache_write":{{"tokenCount":10000000}},"output":{{"tokenCount":2000000}}}}}}}}"#
+            )
+            .unwrap();
+        }
+
+        let mut summary = AgentSessionSummary::default();
+        let mut tool_counts = BTreeMap::new();
+        let mut recent_events = Vec::new();
+        let allowlist = HashSet::new();
+        summarize_events(
+            "test",
+            &path,
+            "test-session",
+            &mut summary,
+            &mut tool_counts,
+            &mut recent_events,
+            &allowlist,
+        );
+
+        // Fresh + cache_write = 100_000 + 10_000_000 = 10_100_000.
+        // cache_read (1B) is intentionally excluded.
+        assert_eq!(
+            summary.input_tokens, 10_100_000,
+            "cache_read must be excluded from input_tokens; got {}",
+            summary.input_tokens
+        );
+        // Output: shutdown's 2M wins over the per-message 1K (max()).
+        assert_eq!(summary.output_tokens, 2_000_000);
+
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Sanity check: every Copilot CLI built-in tool we've observed

@@ -146,6 +146,10 @@ interface InsightCard {
   label: string;
   value: string;
   sub?: string;
+  /// Optional shorter fallback sub-line used when `sub` doesn't fit
+  /// the card width. Lets the Tokens card show "12m in · 2m out" when
+  /// there's room and collapse to "12m/2m" on narrow viewports.
+  subCompact?: string;
   color?: string;
 }
 
@@ -1071,7 +1075,7 @@ export class CodeKingdomScene extends Phaser.Scene {
       { label: 'Active', value: String(this.activity.active_sessions), sub: `${this.activity.scanned_sessions} scanned`, color: this.activity.active_sessions > 0 ? greenAccent : theme.muted },
       { label: 'Tools/min', value: callsPerMin > 0 ? callsPerMin.toFixed(callsPerMin < 10 ? 1 : 0) : '0', sub: `${this.activity.total_tool_calls} total`, color: callsPerMin > 0 ? cyanAccent : theme.muted },
       { label: 'Turns', value: compactNumber(turns), sub: turnsSub, color: turns > 0 ? purpleAccent : theme.muted },
-      { label: 'Tokens · 24h', value: compactNumber(inputTokens + outputTokens), sub: `${compactNumberShort(inputTokens)} in / ${compactNumberShort(outputTokens)} out`, color: goldAccent },
+      { label: 'Tokens · 24h', value: compactNumber(inputTokens + outputTokens), sub: `${compactNumberShort(inputTokens)} in · ${compactNumberShort(outputTokens)} out`, subCompact: `${compactNumberShort(inputTokens)}/${compactNumberShort(outputTokens)}`, color: goldAccent },
     ];
   }
 
@@ -1503,8 +1507,15 @@ export class CodeKingdomScene extends Phaser.Scene {
       // The Tokens sub uses `compactNumberShort` ("925k" vs "924.8k")
       // so even a narrow 1280×800 card (inner width ~107 px → ~8
       // chars) shows the full "925k/331k" without trailing ellipsis.
+      // If the verbose form ("12m in · 2m out") doesn't fit, fall
+      // back to the compact "in/out" form ("12m/2m") which is always
+      // ≤ 9 chars even with millions on both sides.
       const subMaxChars = Math.max(8, Math.floor((w - padX * 2) / 12));
-      this.addText(x + padX, subY, truncate(card.sub, subMaxChars), 12, theme.muted).setOrigin(0, 0.5);
+      let subText = card.sub;
+      if (subText.length > subMaxChars && card.subCompact) {
+        subText = card.subCompact;
+      }
+      this.addText(x + padX, subY, truncate(subText, subMaxChars), 12, theme.muted).setOrigin(0, 0.5);
     }
   }
 
