@@ -3319,17 +3319,17 @@ function eventAgeSeconds(timestamp: string, nowMs = Date.now()): number {
 
 function eventLabel(kind?: string, category?: string) {
   if (!kind && !category) return 'none';
-  if (kind === 'tool.execution_start') return `${category ?? 'tool'} started`;
+  if (kind === 'tool.execution_start') return 'tool started';
   if (kind === 'tool.execution_complete') return category === 'alert' ? 'tool failed' : 'tool completed';
   if (kind === 'assistant.turn_start') return 'thinking started';
   if (kind === 'assistant.turn_end') return 'waiting';
   if (kind === 'user.message') return 'prompt received';
   if (kind === 'session.start') return 'session opened';
-  return category && category !== 'activity' ? category : kind ?? category ?? 'activity';
+  return kind ?? 'activity';
 }
 
 function feedLabel(event: CopilotEventSummary) {
-  if (event.kind === 'tool.execution_start') return `${event.tool} -> ${event.category}`;
+  if (event.kind === 'tool.execution_start') return event.tool || 'tool started';
   if (event.kind === 'tool.execution_complete') return event.success ? 'tool completed' : 'tool failed';
   if (event.kind === 'assistant.turn_start') return 'Copilot started thinking';
   if (event.kind === 'assistant.turn_end') return 'Copilot is waiting';
