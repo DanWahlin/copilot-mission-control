@@ -250,7 +250,9 @@ code {
   flex-direction: column;
   align-items: center;
   justify-content: flex-start;
-  padding: 120px 24px 60px;
+  /* Top padding covers the fixed 60px navbar plus a small breath; the
+     banner provides its own visual weight, so we don't need a huge gap. */
+  padding: 76px 24px 60px;
   overflow: hidden;
 }
 
@@ -280,8 +282,9 @@ code {
 .hero-banner-wrap {
   position: relative;
   width: 100vw;
-  margin-bottom: 32px;
-  padding: 20px 0 28px;
+  margin-top: -16px;
+  margin-bottom: 24px;
+  padding: 8px 0 24px;
   background: linear-gradient(180deg,
     transparent 0%,
     rgba(8,16,42,0.4) 12%,
@@ -987,7 +990,7 @@ code {
 }
 
 @media (max-width: 768px) {
-  .hero { padding: 80px 16px 30px; min-height: auto; }
+  .hero { padding: 70px 16px 30px; min-height: auto; }
   .hero-title { font-size: 1.8rem; }
   .hero-desc { font-size: 1rem; }
   .section { padding: 40px 0; }
@@ -1010,7 +1013,7 @@ code {
 
 @media (max-width: 480px) {
   .container { padding: 0 16px; }
-  .hero { padding: 80px 12px 20px; }
+  .hero { padding: 68px 12px 20px; }
   .hero-title { font-size: 1.45rem; }
   .hero-desc { font-size: 0.92rem; margin-bottom: 20px; }
   .hero-cta { flex-direction: column; align-items: center; }
