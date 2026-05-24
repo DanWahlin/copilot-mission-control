@@ -1060,52 +1060,80 @@ fn categorize_tool(tool_name: &str, mcp_allowlist: &HashSet<String>) -> &'static
     // 2. Pattern heuristic for MCP tools not enumerated in the config
     //    (wildcard tool registrations, MCP servers that connected
     //    after the config was last read, etc.). Copilot CLI's native
-    //    tools (bash, view, edit, grep, glob, create, apply_patch,
-    //    view, skill, task, ask_user, report_intent, exit_plan_mode,
-    //    sql, ...) all use single words or underscore_only names.
-    //    Anything with a hyphen, or with "mcp" in the name, is
-    //    overwhelmingly an MCP server tool (github-mcp-server-*,
-    //    context7-*, kit-dev-mcp-*, io-github-ChromeDevTools-...,
-    //    azure-pricing, ide-get_diagnostics, ...) and belongs in its
-    //    own bucket regardless of what verb it happens to use.
+    //    tools all use single words or underscore_only names; anything
+    //    with a hyphen, or with "mcp" in the name, is overwhelmingly
+    //    an MCP server tool (github-mcp-server-*, context7-*,
+    //    kit-dev-mcp-*, io-github-ChromeDevTools-..., azure-pricing,
+    //    ide-get_diagnostics, ...) and belongs in its own bucket
+    //    regardless of what verb it happens to use.
     if name.contains("mcp") || name.contains('-') {
         return "mcp";
     }
+    // 3. Composite / suffix patterns FIRST so wrapper tools route to
+    //    the quarter that matches the work they actually do. Without
+    //    this ordering, `read_bash` matches "read" -> library (wrong)
+    //    instead of "bash" -> terminal; `write_agent` matches "write"
+    //    -> forge (wrong) instead of "agent" -> delegates;
+    //    `web_search` matches "search" -> library (wrong) instead of
+    //    "web" -> signal.
+    if name.contains("bash")
+        || name.contains("shell")
+        || name.contains("sql")
+        || name.contains("test")
+    {
+        return "terminal";
+    }
+    if name.contains("agent") || name.contains("task") {
+        return "delegates";
+    }
+    if name.contains("web")
+        || name.contains("fetch")
+        || name.contains("docs")
+        || name.contains("github")
+    {
+        return "signal";
+    }
+    // 4. Verb-only patterns for the remaining single-word native tools.
     if name.contains("edit")
         || name.contains("create")
         || name.contains("apply_patch")
         || name.contains("write")
     {
-        "forge"
-    } else if name.contains("view")
+        return "forge";
+    }
+    if name.contains("view")
         || name.contains("read")
         || name.contains("grep")
         || name.contains("rg")
         || name.contains("glob")
         || name.contains("search")
     {
-        "library"
-    } else if name.contains("bash")
-        || name.contains("shell")
-        || name.contains("sql")
-        || name.contains("test")
-    {
-        "terminal"
-    } else if name.contains("web")
-        || name.contains("fetch")
-        || name.contains("docs")
-        || name.contains("github")
-    {
-        "signal"
-    } else if name.contains("skill") {
-        "skills"
-    } else if name.contains("task") || name.contains("agent") {
-        "delegates"
-    } else if name.contains("ask") || name.contains("report_intent") {
-        "court"
-    } else {
-        "workshop"
+        return "library";
     }
+    // 5. Meta / control tools. Knowledge stores (store_memory,
+    //    vote_memory, ...) live in Tome Hall alongside skills since
+    //    both represent learned/persisted state the agent carries
+    //    forward. Planning, intent, scheduling, and "exit plan mode"
+    //    live in Royal Court — the dev-facing "what should we do
+    //    next" bucket.
+    if name.contains("skill") || name.contains("memory") {
+        return "skills";
+    }
+    if name.contains("ask")
+        || name.contains("intent")
+        || name.contains("plan")
+        || name.contains("schedule")
+    {
+        return "court";
+    }
+    // 6. Final fallback: Royal Court is the dev-facing "control"
+    //    quarter and is the closest analogue for an unrecognized meta
+    //    tool. We deliberately do NOT fall back to "workshop" —
+    //    that produced invisible tool calls (no pulse, no quarter
+    //    count, no drill-down listing) for any future tool we didn't
+    //    enumerate above. Routing to an existing quarter keeps every
+    //    tool call visible somewhere on the map.
+    "court"
 }
 
 fn categorize_event(event_type: &str) -> &'static str {
@@ -1363,7 +1391,7 @@ mod tests {
     /// Tools registered by an MCP server but with underscore-only
     /// names (Playwright's `browser_close`, `browser_navigate`,
     /// presentation server's `add_slide_from_code`, etc.) used to fall
-    /// through the hyphen/`mcp` heuristic and land in "workshop"
+    /// through the hyphen/`mcp` heuristic and land in the fallback
     /// — invisible in every quarter. The allowlist must override
     /// that and route them to "mcp".
     #[test]
@@ -1393,5 +1421,81 @@ mod tests {
         assert_eq!(categorize_tool("edit", &allowlist), "forge");
         // Hyphenated tool still routes to mcp via the heuristic.
         assert_eq!(categorize_tool("github-mcp-server-list", &allowlist), "mcp");
+    }
+
+    /// Wrapper tools whose name combines a verb prefix with the
+    /// wrapped subsystem's name (read_bash, write_agent, web_search,
+    /// ...) must route to the quarter that matches the work the tool
+    /// actually performs, not the quarter implied by the verb prefix.
+    /// Before the pattern reorder these all landed in forge/library
+    /// purely because "read"/"write"/"search" was checked before
+    /// "bash"/"agent"/"web".
+    #[test]
+    fn composite_names_beat_verb_prefixes() {
+        let allowlist = HashSet::new();
+        // *_bash / *_shell / *_sql / *_test should all land in terminal,
+        // not in forge (write) or library (read) just because of the
+        // prefix verb.
+        assert_eq!(categorize_tool("read_bash", &allowlist), "terminal");
+        assert_eq!(categorize_tool("write_bash", &allowlist), "terminal");
+        assert_eq!(categorize_tool("stop_bash", &allowlist), "terminal");
+        assert_eq!(categorize_tool("list_bash", &allowlist), "terminal");
+        // *_agent should land in delegates (Guild Hall) since the
+        // tool drives a sub-agent, not in library/forge.
+        assert_eq!(categorize_tool("read_agent", &allowlist), "delegates");
+        assert_eq!(categorize_tool("write_agent", &allowlist), "delegates");
+        assert_eq!(categorize_tool("list_agents", &allowlist), "delegates");
+        assert_eq!(categorize_tool("stop_agent", &allowlist), "delegates");
+        // web_search is a web tool — Signal Tower, not Library.
+        assert_eq!(categorize_tool("web_search", &allowlist), "signal");
+        assert_eq!(categorize_tool("web_fetch", &allowlist), "signal");
+    }
+
+    /// Built-in meta/control tools (vote_memory, store_memory,
+    /// exit_plan_mode, manage_schedule, ...) previously fell through
+    /// every heuristic branch and landed in the "workshop" fallback,
+    /// which had no quarter — so the tool call appeared in the
+    /// Activity Feed but no building's count incremented and no pulse
+    /// flew to any quarter. They must route to a quarter that exists.
+    #[test]
+    fn meta_control_tools_land_in_a_real_quarter() {
+        let allowlist = HashSet::new();
+        // Memory tools = persisted knowledge = Tome Hall (skills).
+        assert_eq!(categorize_tool("store_memory", &allowlist), "skills");
+        assert_eq!(categorize_tool("vote_memory", &allowlist), "skills");
+        // Plan/schedule/intent = Royal Court (dev-facing control).
+        assert_eq!(categorize_tool("exit_plan_mode", &allowlist), "court");
+        assert_eq!(categorize_tool("manage_schedule", &allowlist), "court");
+        assert_eq!(categorize_tool("ask_user", &allowlist), "court");
+        assert_eq!(categorize_tool("report_intent", &allowlist), "court");
+    }
+
+    /// Sanity check: every Copilot CLI built-in tool we've observed
+    /// must land in one of the eight known quarter keys. No tool
+    /// should ever be invisible in the kingdom.
+    #[test]
+    fn every_observed_builtin_routes_to_a_known_quarter() {
+        let allowlist = HashSet::new();
+        const QUARTERS: &[&str] = &[
+            "forge", "library", "terminal", "signal", "delegates", "skills", "court", "mcp",
+        ];
+        let tools = [
+            "bash", "write_bash", "read_bash", "stop_bash", "list_bash",
+            "view", "edit", "create", "apply_patch", "grep", "glob",
+            "web_fetch", "web_search", "fetch_copilot_cli_documentation",
+            "ask_user", "report_intent",
+            "store_memory", "vote_memory",
+            "exit_plan_mode", "manage_schedule",
+            "list_agents", "read_agent", "write_agent", "stop_agent",
+            "sql", "session_store_sql",
+            "tool_search_tool_regex",
+        ];
+        for tool in tools {
+            let cat = categorize_tool(tool, &allowlist);
+            assert!(
+                QUARTERS.contains(&cat),
+                "tool {tool} -> {cat}, which is not a real quarter"
+            );
+        }
     }
 }
