@@ -18,7 +18,7 @@ mod agent;
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager,
+    AppHandle, Manager, WebviewWindow,
 };
 use tauri_plugin_window_state::StateFlags;
 
@@ -31,6 +31,8 @@ use agent::{collect_agent_activity, AgentActivity};
 const TRAY_ICON_BYTES: &[u8] = include_bytes!("../icons/tray_icon.png");
 #[cfg(target_os = "macos")]
 const DOCK_ICON_BYTES: &[u8] = include_bytes!("../icons/dock_icon.png");
+const MIN_VISIBLE_WINDOW_WIDTH: i64 = 240;
+const MIN_VISIBLE_WINDOW_HEIGHT: i64 = 160;
 
 /// macOS only: set the running app's Dock icon via NSApplication. Tauri
 /// dev runs the bare binary (no .app bundle), so macOS otherwise falls
@@ -113,10 +115,53 @@ async fn open_in_editor(path: String, scheme: Option<String>) -> Result<(), Stri
 
 fn show_window(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
+        ensure_window_visible(&win);
         let _ = win.show();
         let _ = win.unminimize();
         let _ = win.set_focus();
     }
+}
+
+fn ensure_window_visible(win: &WebviewWindow) {
+    if window_has_visible_area(win) {
+        return;
+    }
+    let _ = win.center();
+}
+
+fn window_has_visible_area(win: &WebviewWindow) -> bool {
+    let Ok(position) = win.outer_position() else {
+        return true;
+    };
+    let Ok(size) = win.outer_size() else {
+        return true;
+    };
+    let Ok(monitors) = win.available_monitors() else {
+        return true;
+    };
+    if monitors.is_empty() {
+        return true;
+    }
+
+    let win_left = i64::from(position.x);
+    let win_top = i64::from(position.y);
+    let win_right = win_left + i64::from(size.width);
+    let win_bottom = win_top + i64::from(size.height);
+    let required_width = MIN_VISIBLE_WINDOW_WIDTH.min(i64::from(size.width));
+    let required_height = MIN_VISIBLE_WINDOW_HEIGHT.min(i64::from(size.height));
+
+    monitors.iter().any(|monitor| {
+        let monitor_position = monitor.position();
+        let monitor_size = monitor.size();
+        let monitor_left = i64::from(monitor_position.x);
+        let monitor_top = i64::from(monitor_position.y);
+        let monitor_right = monitor_left + i64::from(monitor_size.width);
+        let monitor_bottom = monitor_top + i64::from(monitor_size.height);
+
+        let visible_width = win_right.min(monitor_right) - win_left.max(monitor_left);
+        let visible_height = win_bottom.min(monitor_bottom) - win_top.max(monitor_top);
+        visible_width >= required_width && visible_height >= required_height
+    })
 }
 
 fn toggle_window(app: &AppHandle) {
@@ -163,6 +208,10 @@ pub fn run() {
             // the app lifetime and pushes refresh callbacks to the
             // renderer whenever any provider's state directory changes.
             agent::start_watcher(app.handle().clone());
+
+            if let Some(win) = app.get_webview_window("main") {
+                ensure_window_visible(&win);
+            }
 
             // Build a minimal system tray with Show/Hide and Quit.
             let is_mac = cfg!(target_os = "macos");
