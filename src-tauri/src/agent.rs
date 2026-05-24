@@ -17,12 +17,13 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{env, fs};
 
 use notify::{recommended_watcher, RecursiveMode, Watcher};
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
 
 // ── Public types serialized to the renderer ───────────────────────────
@@ -267,6 +268,592 @@ const MAX_SESSION_TOOL_CALLS: usize = 120;
 /// Matches the same "recent, bounded, tail-window" philosophy as tool
 /// calls so the bridge payload stays small even during long sessions.
 const MAX_SESSION_TURNS: usize = 80;
+const BUNDLED_COPILOT_SCHEMA: &str = include_str!("../provider-schemas/copilot.json");
+const SUPPORTED_SCHEMA_MAJOR: &str = "1";
+const REMOTE_COPILOT_SCHEMA_INDEX_URL: &str =
+    "https://danwahlin.github.io/copilot-mission-control/provider-schemas/copilot/index.json";
+const SCHEMA_FETCH_TIMEOUT_SECS: u64 = 2;
+static COPILOT_SCHEMA: OnceLock<(ProviderSchema, Vec<String>)> = OnceLock::new();
+
+#[derive(serde::Deserialize, Clone)]
+struct ProviderSchema {
+    schema_version: String,
+    provider: String,
+    state_root: Vec<String>,
+    session: SessionSchema,
+    workspace: WorkspaceSchema,
+    events: EventsSchema,
+    #[serde(default)]
+    token_events: Vec<TokenEventSchema>,
+    #[serde(default)]
+    tool_identity_rules: Vec<ToolIdentityRule>,
+    mcp: McpSchema,
+    #[serde(default)]
+    tool_category_rules: Vec<ToolCategoryRule>,
+    fallback_category: String,
+}
+
+#[derive(serde::Deserialize, Clone)]
+struct SessionSchema {
+    events_files: Vec<String>,
+    workspace_files: Vec<String>,
+    relevant_files: Vec<String>,
+}
+
+#[derive(serde::Deserialize, Clone)]
+struct WorkspaceSchema {
+    allowed_keys: Vec<String>,
+}
+
+#[derive(serde::Deserialize, Clone)]
+struct EventsSchema {
+    event_type_paths: Vec<String>,
+    tool_start: String,
+    tool_complete: String,
+    assistant_message: String,
+    assistant_turn_start: String,
+    assistant_turn_end: String,
+    user_message: String,
+    session_start: String,
+    #[serde(default)]
+    ignore_as_last_event: Vec<String>,
+    timestamp_paths: Vec<String>,
+    model_paths: Vec<String>,
+    tool_name_paths: Vec<String>,
+    arguments_paths: Vec<String>,
+    success_paths: Vec<String>,
+    output_token_paths: Vec<String>,
+    turn_id_paths: Vec<String>,
+    tool_call_id_paths: Vec<String>,
+}
+
+#[derive(serde::Deserialize, Clone)]
+struct TokenEventSchema {
+    event_type: String,
+    mode: String,
+    #[serde(default)]
+    input_components: Vec<String>,
+    #[serde(default)]
+    output_components: Vec<String>,
+}
+
+#[derive(serde::Deserialize, Clone)]
+struct ToolIdentityRule {
+    tool: String,
+    category: String,
+    #[serde(default)]
+    target_paths: Vec<String>,
+    fallback: String,
+    #[serde(default)]
+    safe_details: Vec<SafeDetailRule>,
+}
+
+#[derive(serde::Deserialize, Clone)]
+struct SafeDetailRule {
+    label: String,
+    paths: Vec<String>,
+    fallback: String,
+}
+
+#[derive(serde::Deserialize, Clone)]
+struct McpSchema {
+    allowlist_path: Vec<String>,
+    servers_path: String,
+    tools_key: String,
+}
+
+#[derive(serde::Deserialize, Clone)]
+struct ToolCategoryRule {
+    category: String,
+    #[serde(default)]
+    exact: Vec<String>,
+    #[serde(default)]
+    contains: Vec<String>,
+    #[serde(default)]
+    mcp_allowlist: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct ProviderSchemaIndex {
+    schema_index_version: u64,
+    provider: String,
+    schemas: Vec<RemoteSchemaEntry>,
+}
+
+#[derive(serde::Deserialize, Clone)]
+struct RemoteSchemaEntry {
+    version: String,
+    url: String,
+    sha256: String,
+}
+
+fn load_copilot_schema() -> (ProviderSchema, Vec<String>) {
+    COPILOT_SCHEMA.get_or_init(resolve_copilot_schema).clone()
+}
+
+fn resolve_copilot_schema() -> (ProviderSchema, Vec<String>) {
+    let bundled = parse_provider_schema(BUNDLED_COPILOT_SCHEMA)
+        .expect("bundled Copilot provider schema must be valid");
+    let mut alerts = Vec::new();
+
+    // Runtime schema overrides are deliberately opt-in. A provider
+    // schema controls which local JSON paths get inspected, so release
+    // builds must not accept arbitrary environment-provided schemas by
+    // accident. The interpreter still sanitizes every surfaced value,
+    // but the safest default is the signed, bundled schema.
+    let override_enabled = env::var("CMC_ALLOW_SCHEMA_OVERRIDE")
+        .map(|value| value == "1")
+        .unwrap_or(false);
+    if override_enabled {
+        if let Some(path) = env::var_os("CMC_COPILOT_SCHEMA").map(PathBuf::from) {
+            match fs::read_to_string(&path)
+                .map_err(|err| err.to_string())
+                .and_then(|raw| parse_provider_schema(&raw))
+            {
+                Ok(schema) => return (schema, alerts),
+                Err(err) => {
+                    alerts.push(format!(
+                        "Unable to load Copilot provider schema override {}; using bundled schema: {}",
+                        path.display(),
+                        err
+                    ));
+                    return (bundled, alerts);
+                }
+            }
+        }
+    }
+
+    if env::var("CMC_DISABLE_REMOTE_SCHEMA")
+        .map(|value| value == "1")
+        .unwrap_or(false)
+    {
+        return (bundled, alerts);
+    }
+
+    match load_remote_copilot_schema(&bundled) {
+        Ok(Some(schema)) => return (schema, alerts),
+        Ok(None) => {}
+        Err(err) => log::debug!("Unable to load remote Copilot provider schema: {}", err),
+    }
+
+    match load_cached_copilot_schema(&bundled) {
+        Ok(Some(schema)) => (schema, alerts),
+        Ok(None) => (bundled, alerts),
+        Err(err) => {
+            log::debug!("Unable to load cached Copilot provider schema: {}", err);
+            (bundled, alerts)
+        }
+    }
+}
+
+fn load_remote_copilot_schema(bundled: &ProviderSchema) -> Result<Option<ProviderSchema>, String> {
+    let index_raw = fetch_schema_url(REMOTE_COPILOT_SCHEMA_INDEX_URL)?;
+    let index: ProviderSchemaIndex =
+        serde_json::from_str(&index_raw).map_err(|err| err.to_string())?;
+    validate_schema_index(&index)?;
+    let Some(entry) = newest_compatible_schema_entry(&index.schemas, &bundled.schema_version)
+    else {
+        return Ok(None);
+    };
+    let schema_url = resolve_schema_url(REMOTE_COPILOT_SCHEMA_INDEX_URL, &entry.url)?;
+    let schema_raw = fetch_schema_url(&schema_url)?;
+    validate_schema_checksum(&schema_raw, &entry.sha256)?;
+    let schema = parse_provider_schema(&schema_raw)?;
+    if schema.schema_version != entry.version {
+        return Err(format!(
+            "remote schema version '{}' did not match index entry '{}'",
+            schema.schema_version, entry.version
+        ));
+    }
+    cache_copilot_schema(&schema.schema_version, &schema_raw);
+    Ok(Some(schema))
+}
+
+fn load_cached_copilot_schema(bundled: &ProviderSchema) -> Result<Option<ProviderSchema>, String> {
+    let Some(cache_dir) = copilot_schema_cache_dir() else {
+        return Ok(None);
+    };
+    let Ok(entries) = fs::read_dir(cache_dir) else {
+        return Ok(None);
+    };
+    let mut schemas = Vec::new();
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(raw) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(schema) = parse_provider_schema(&raw) else {
+            continue;
+        };
+        if is_compatible_schema_version(&schema.schema_version)
+            && is_newer_schema_version(&schema.schema_version, &bundled.schema_version)
+            && cached_schema_checksum_valid(&path, &raw)
+        {
+            schemas.push(schema);
+        }
+    }
+    schemas.sort_by(|a, b| {
+        compare_versions(&b.schema_version, &a.schema_version).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Ok(schemas.into_iter().next())
+}
+
+fn validate_schema_index(index: &ProviderSchemaIndex) -> Result<(), String> {
+    if index.schema_index_version != 1 {
+        return Err(format!(
+            "unsupported schema index version '{}'",
+            index.schema_index_version
+        ));
+    }
+    if index.provider != "copilot" {
+        return Err(format!(
+            "unsupported schema index provider '{}'",
+            index.provider
+        ));
+    }
+    Ok(())
+}
+
+fn newest_compatible_schema_entry(
+    entries: &[RemoteSchemaEntry],
+    bundled_version: &str,
+) -> Option<RemoteSchemaEntry> {
+    let mut compatible = entries
+        .iter()
+        .filter(|entry| is_compatible_schema_version(&entry.version))
+        .filter(|entry| is_newer_schema_version(&entry.version, bundled_version))
+        .cloned()
+        .collect::<Vec<_>>();
+    compatible.sort_by(|a, b| {
+        compare_versions(&b.version, &a.version).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    compatible.into_iter().next()
+}
+
+fn fetch_schema_url(url: &str) -> Result<String, String> {
+    if !url.starts_with("https://") {
+        return Err(format!("refusing non-HTTPS schema URL '{}'", url));
+    }
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(SCHEMA_FETCH_TIMEOUT_SECS))
+        .user_agent(format!(
+            "copilot-mission-control/{}",
+            env!("CARGO_PKG_VERSION")
+        ))
+        .build()
+        .map_err(|err| err.to_string())?;
+    client
+        .get(url)
+        .send()
+        .and_then(|response| response.error_for_status())
+        .map_err(|err| err.to_string())?
+        .text()
+        .map_err(|err| err.to_string())
+}
+
+fn resolve_schema_url(index_url: &str, schema_url: &str) -> Result<String, String> {
+    let Some((base, _)) = index_url.rsplit_once('/') else {
+        return Err("schema index URL has no parent path".to_string());
+    };
+    if schema_url.starts_with("https://") {
+        let Some(relative) = schema_url.strip_prefix(&format!("{}/", base)) else {
+            return Err(format!(
+                "refusing schema URL outside index path '{}'",
+                schema_url
+            ));
+        };
+        if !is_safe_relative_schema_url(relative) {
+            return Err(format!("refusing unsafe schema URL '{}'", schema_url));
+        }
+        return Ok(schema_url.to_string());
+    }
+    if !is_safe_relative_schema_url(schema_url) {
+        return Err(format!("refusing unsafe schema URL '{}'", schema_url));
+    }
+    Ok(format!("{}/{}", base, schema_url))
+}
+
+fn is_safe_relative_schema_url(schema_url: &str) -> bool {
+    !schema_url.is_empty()
+        && schema_url.ends_with(".json")
+        && !schema_url.starts_with('/')
+        && !schema_url.starts_with('.')
+        && !schema_url.contains("://")
+        && !schema_url.contains("..")
+        && !schema_url.contains('%')
+        && !schema_url.contains('\\')
+        && !schema_url.contains('?')
+        && !schema_url.contains('#')
+        && !schema_url.contains('\0')
+        && schema_url.split('/').all(|segment| {
+            !segment.is_empty()
+                && !segment.starts_with('.')
+                && segment
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+        })
+}
+
+fn validate_schema_checksum(raw: &str, expected: &str) -> Result<(), String> {
+    let actual = sha256_hex(raw);
+    if actual.eq_ignore_ascii_case(expected) {
+        Ok(())
+    } else {
+        Err(format!(
+            "schema checksum mismatch: expected {}, got {}",
+            expected, actual
+        ))
+    }
+}
+
+fn sha256_hex(raw: &str) -> String {
+    let digest = Sha256::digest(raw.as_bytes());
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        hex.push_str(&format!("{:02x}", byte));
+    }
+    hex
+}
+
+fn cache_copilot_schema(version: &str, raw: &str) {
+    let Some(cache_dir) = copilot_schema_cache_dir() else {
+        return;
+    };
+    if fs::create_dir_all(&cache_dir).is_err() {
+        return;
+    }
+    let _ = fs::write(cache_dir.join(format!("{}.json", version)), raw);
+    let _ = fs::write(
+        cache_dir.join(format!("{}.sha256", version)),
+        sha256_hex(raw),
+    );
+}
+
+fn cached_schema_checksum_valid(path: &Path, raw: &str) -> bool {
+    let checksum_path = path.with_extension("sha256");
+    let Ok(expected) = fs::read_to_string(checksum_path) else {
+        return false;
+    };
+    sha256_hex(raw).eq_ignore_ascii_case(expected.trim())
+}
+
+fn copilot_schema_cache_dir() -> Option<PathBuf> {
+    home_dir().map(|home| {
+        home.join(".copilot-mission-control")
+            .join("provider-schemas")
+            .join("copilot")
+    })
+}
+
+fn is_compatible_schema_version(version: &str) -> bool {
+    version.split('.').next() == Some(SUPPORTED_SCHEMA_MAJOR)
+}
+
+fn compare_versions(left: &str, right: &str) -> Option<std::cmp::Ordering> {
+    Some(parse_schema_version(left)?.cmp(&parse_schema_version(right)?))
+}
+
+fn is_newer_schema_version(candidate: &str, baseline: &str) -> bool {
+    compare_versions(candidate, baseline) == Some(std::cmp::Ordering::Greater)
+}
+
+fn parse_schema_version(version: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = version.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next().unwrap_or("0").parse().ok()?;
+    let patch = parts.next().unwrap_or("0").parse().ok()?;
+    Some((major, minor, patch))
+}
+
+fn parse_provider_schema(raw: &str) -> Result<ProviderSchema, String> {
+    let schema: ProviderSchema = serde_json::from_str(raw).map_err(|err| err.to_string())?;
+    validate_provider_schema(&schema)?;
+    Ok(schema)
+}
+
+fn validate_provider_schema(schema: &ProviderSchema) -> Result<(), String> {
+    if schema.provider != "copilot" {
+        return Err(format!("unsupported provider '{}'", schema.provider));
+    }
+    let major = schema.schema_version.split('.').next().unwrap_or_default();
+    if major != SUPPORTED_SCHEMA_MAJOR {
+        return Err(format!(
+            "unsupported schema version '{}' (expected major {})",
+            schema.schema_version, SUPPORTED_SCHEMA_MAJOR
+        ));
+    }
+    if schema.state_root.is_empty() {
+        return Err("state_root must contain at least one path segment".to_string());
+    }
+    if schema.session.events_files.is_empty() {
+        return Err("session.events_files must not be empty".to_string());
+    }
+    if schema.session.workspace_files.is_empty() {
+        return Err("session.workspace_files must not be empty".to_string());
+    }
+    if schema.events.event_type_paths.is_empty()
+        || schema.events.tool_start.is_empty()
+        || schema.events.tool_complete.is_empty()
+        || schema.events.assistant_message.is_empty()
+    {
+        return Err("core event type names must not be empty".to_string());
+    }
+    validate_path_suffixes(&schema.events.event_type_paths, &["type"], "event type")?;
+    validate_path_suffixes(
+        &schema.events.timestamp_paths,
+        &["timestamp", "created_at"],
+        "timestamp",
+    )?;
+    validate_path_suffixes(&schema.events.model_paths, &["model"], "model")?;
+    validate_path_suffixes(
+        &schema.events.tool_name_paths,
+        &["toolName", "tool_name"],
+        "tool name",
+    )?;
+    validate_path_suffixes(
+        &schema.events.arguments_paths,
+        &["arguments", "args"],
+        "arguments",
+    )?;
+    validate_arguments_paths(&schema.events.arguments_paths)?;
+    validate_path_suffixes(&schema.events.success_paths, &["success"], "success")?;
+    validate_path_suffixes(
+        &schema.events.output_token_paths,
+        &["outputTokens", "output_tokens"],
+        "output token",
+    )?;
+    validate_path_suffixes(
+        &schema.events.turn_id_paths,
+        &["turnId", "turn_id"],
+        "turn id",
+    )?;
+    validate_path_suffixes(
+        &schema.events.tool_call_id_paths,
+        &["toolCallId", "tool_call_id"],
+        "tool call id",
+    )?;
+    for token in &schema.token_events {
+        if !matches!(token.mode.as_str(), "additive" | "cumulative_max") {
+            return Err(format!("unsupported token mode '{}'", token.mode));
+        }
+    }
+    for category in schema
+        .tool_category_rules
+        .iter()
+        .map(|rule| rule.category.as_str())
+        .chain(
+            schema
+                .tool_identity_rules
+                .iter()
+                .map(|rule| rule.category.as_str()),
+        )
+        .chain(std::iter::once(schema.fallback_category.as_str()))
+    {
+        if !is_known_tool_category(category) {
+            return Err(format!("unknown tool category '{}'", category));
+        }
+    }
+    for rule in &schema.tool_identity_rules {
+        for path in &rule.target_paths {
+            if !is_safe_surface_path(path) {
+                return Err(format!(
+                    "unsafe surfaced identity path '{}' for tool '{}'",
+                    path, rule.tool
+                ));
+            }
+        }
+        for detail in &rule.safe_details {
+            for path in &detail.paths {
+                if !is_safe_surface_path(path) {
+                    return Err(format!(
+                        "unsafe surfaced detail path '{}' for tool '{}'",
+                        path, rule.tool
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_known_tool_category(category: &str) -> bool {
+    matches!(
+        category,
+        "forge" | "library" | "terminal" | "signal" | "delegates" | "skills" | "court" | "mcp"
+    )
+}
+
+fn validate_path_suffixes(paths: &[String], allowed: &[&str], label: &str) -> Result<(), String> {
+    for path in paths {
+        let Some(last) = path.split('.').next_back() else {
+            return Err(format!("invalid {} path '{}'", label, path));
+        };
+        if !allowed
+            .iter()
+            .any(|allowed| last.eq_ignore_ascii_case(allowed))
+        {
+            return Err(format!("unsafe {} path '{}'", label, path));
+        }
+    }
+    Ok(())
+}
+
+fn validate_arguments_paths(paths: &[String]) -> Result<(), String> {
+    for path in paths {
+        if path.split('.').any(|segment| {
+            matches!(
+                segment.to_ascii_lowercase().as_str(),
+                "prompt"
+                    | "command"
+                    | "content"
+                    | "result"
+                    | "output"
+                    | "path"
+                    | "file"
+                    | "file_path"
+                    | "diff"
+            )
+        }) {
+            return Err(format!("unsafe arguments path '{}'", path));
+        }
+    }
+    Ok(())
+}
+
+fn is_safe_surface_path(path: &str) -> bool {
+    !path.split('.').any(|segment| {
+        matches!(
+            segment.to_ascii_lowercase().as_str(),
+            "prompt"
+                | "command"
+                | "content"
+                | "result"
+                | "output"
+                | "path"
+                | "file"
+                | "file_path"
+                | "diff"
+                | "arguments"
+        )
+    })
+}
+
+fn path_from_home(home: &Path, segments: &[String]) -> PathBuf {
+    segments
+        .iter()
+        .fold(home.to_path_buf(), |path, segment| path.join(segment))
+}
+
+fn first_existing_child(parent: &Path, names: &[String]) -> PathBuf {
+    names
+        .iter()
+        .map(|name| parent.join(name))
+        .find(|path| path.exists())
+        .unwrap_or_else(|| parent.join(&names[0]))
+}
 
 pub fn collect_agent_activity() -> AgentActivity {
     let providers = default_providers();
@@ -414,7 +1001,8 @@ impl AgentProvider for CopilotProvider {
         is_copilot_available()
     }
     fn state_root(&self) -> Option<PathBuf> {
-        home_dir().map(|h| h.join(".copilot").join("session-state"))
+        let (schema, _) = load_copilot_schema();
+        home_dir().map(|h| path_from_home(&h, &schema.state_root))
     }
     fn scan(&self) -> ProviderScan {
         scan_copilot()
@@ -423,9 +1011,11 @@ impl AgentProvider for CopilotProvider {
 
 fn scan_copilot() -> ProviderScan {
     let provider = "copilot";
+    let (schema, schema_alerts) = load_copilot_schema();
     let available = is_copilot_available();
     let mut scan = ProviderScan::unavailable(provider);
     scan.available = available;
+    scan.alerts.extend(schema_alerts);
 
     let Some(home) = home_dir() else {
         scan.alerts
@@ -433,10 +1023,10 @@ fn scan_copilot() -> ProviderScan {
         return scan;
     };
 
-    let state_dir = home.join(".copilot").join("session-state");
+    let state_dir = path_from_home(&home, &schema.state_root);
     if !state_dir.exists() {
         scan.alerts
-            .push("No ~/.copilot/session-state directory found yet.".to_string());
+            .push(format!("No {} directory found yet.", state_dir.display()));
         return scan;
     }
 
@@ -448,8 +1038,8 @@ fn scan_copilot() -> ProviderScan {
                 if !path.is_dir() {
                     return None;
                 }
-                let modified = path
-                    .join("events.jsonl")
+                let events_path = first_existing_child(&path, &schema.session.events_files);
+                let modified = events_path
                     .metadata()
                     .and_then(|m| m.modified())
                     .or_else(|_| entry.metadata().and_then(|m| m.modified()))
@@ -479,7 +1069,7 @@ fn scan_copilot() -> ProviderScan {
     scan.scanned_sessions = session_dirs.len();
 
     // Load once per scan; reused for every tool execution event below.
-    let mcp_allowlist = load_mcp_tool_allowlist();
+    let mcp_allowlist = load_mcp_tool_allowlist(&schema);
 
     let now = SystemTime::now();
 
@@ -489,7 +1079,9 @@ fn scan_copilot() -> ProviderScan {
             .and_then(|n| n.to_str())
             .unwrap_or("unknown")
             .to_string();
-        let workspace = parse_workspace(&session_path.join("workspace.yaml"));
+        let workspace_path = first_existing_child(&session_path, &schema.session.workspace_files);
+        let events_path = first_existing_child(&session_path, &schema.session.events_files);
+        let workspace = parse_workspace(&workspace_path, &schema);
         let age_seconds = now
             .duration_since(modified)
             .map(|age| age.as_secs())
@@ -521,12 +1113,13 @@ fn scan_copilot() -> ProviderScan {
 
         summarize_events(
             provider,
-            &session_path.join("events.jsonl"),
+            &events_path,
             &session_id,
             &mut summary,
             &mut scan.tool_counts,
             &mut scan.recent_events,
             &mcp_allowlist,
+            &schema,
         );
 
         // Active sessions report "working" or "thinking" by activity
@@ -671,7 +1264,7 @@ fn unix_ms(time: SystemTime) -> u64 {
         .unwrap_or(0)
 }
 
-fn parse_workspace(path: &Path) -> BTreeMap<String, String> {
+fn parse_workspace(path: &Path, schema: &ProviderSchema) -> BTreeMap<String, String> {
     let mut values = BTreeMap::new();
     let Ok(content) = fs::read_to_string(path) else {
         return values;
@@ -682,10 +1275,12 @@ fn parse_workspace(path: &Path) -> BTreeMap<String, String> {
             continue;
         };
         let key = key.trim();
-        if matches!(
-            key,
-            "id" | "repository" | "branch" | "summary" | "git_root" | "updated_at"
-        ) {
+        if schema
+            .workspace
+            .allowed_keys
+            .iter()
+            .any(|allowed| allowed == key)
+        {
             values.insert(key.to_string(), value.trim().trim_matches('"').to_string());
         }
     }
@@ -819,6 +1414,7 @@ fn summarize_events(
     tool_counts: &mut BTreeMap<(String, String), usize>,
     recent_events: &mut Vec<AgentEventSummary>,
     mcp_allowlist: &HashSet<String>,
+    schema: &ProviderSchema,
 ) {
     let Ok(mut file) = fs::File::open(path) else {
         return;
@@ -848,7 +1444,7 @@ fn summarize_events(
     if file_len > MAX_READ_BYTES {
         if let Ok(head_file) = fs::File::open(path) {
             let head_reader = BufReader::new(head_file.take(file_len - MAX_READ_BYTES));
-            fold_skipped_token_events(head_reader, summary);
+            fold_skipped_token_events(head_reader, summary, schema);
         }
         let _ = file.seek(SeekFrom::Start(file_len - MAX_READ_BYTES));
     }
@@ -866,19 +1462,20 @@ fn summarize_events(
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
-        let event_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        let timestamp = value
-            .get("timestamp")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let event_type =
+            string_from_paths(&value, &schema.events.event_type_paths).unwrap_or_default();
+        let event_type = event_type.as_str();
+        let timestamp =
+            string_from_paths(&value, &schema.events.timestamp_paths).unwrap_or_default();
 
         summary.event_count += 1;
         let event_category = categorize_event(event_type).to_string();
-        if !matches!(
-            event_type,
-            "session.compaction_complete" | "session.shutdown"
-        ) {
+        if !schema
+            .events
+            .ignore_as_last_event
+            .iter()
+            .any(|ignored| ignored == event_type)
+        {
             record_last_event(summary, &timestamp, event_type, &event_category);
         }
 
@@ -887,35 +1484,27 @@ fn summarize_events(
         // etc.). The JSONL is appended chronologically so the last
         // write wins → newer events overwrite the captured value,
         // letting the renderer surface mid-session model switches.
-        if let Some(model) = value
-            .get("data")
-            .and_then(|data| data.get("model"))
-            .and_then(|v| v.as_str())
-        {
+        if let Some(model) = string_from_paths(&value, &schema.events.model_paths) {
             if !model.is_empty() {
-                current_model = model.to_string();
+                current_model = model;
                 summary.last_model = current_model.clone();
             }
         }
 
-        if event_type == "tool.execution_start" {
-            let raw_tool_name = value
-                .get("data")
-                .and_then(|data| data.get("toolName"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("tool")
-                .to_string();
-            let args = value.get("data").and_then(|data| data.get("arguments"));
-            let raw_call_id = raw_tool_call_id(&value);
+        if event_type == schema.events.tool_start {
+            let raw_tool_name = string_from_paths(&value, &schema.events.tool_name_paths)
+                .unwrap_or_else(|| "tool".to_string());
+            let args = value_from_paths(&value, &schema.events.arguments_paths);
+            let raw_call_id = raw_tool_call_id(&value, schema);
             let call_id = raw_call_id
                 .as_deref()
                 .map(|id| safe_ref_id("call", id))
                 .unwrap_or_default();
-            let turn_id = raw_event_turn_id(&value)
+            let turn_id = raw_event_turn_id(&value, schema)
                 .map(|id| safe_ref_id("turn", &id))
                 .or_else(|| active_turn_id.clone())
                 .unwrap_or_default();
-            let (tool_name, category) = classify_tool(&raw_tool_name, args, mcp_allowlist);
+            let (tool_name, category) = classify_tool(&raw_tool_name, args, mcp_allowlist, schema);
             record_last_event(summary, &timestamp, event_type, &category);
             if !turn_id.is_empty() {
                 let partial = !turns.contains_key(&turn_id);
@@ -978,7 +1567,13 @@ fn summarize_events(
                     call_id: call_id.clone(),
                     turn_id: turn_id.clone(),
                     target: tool_name.clone(),
-                    details: build_safe_tool_details(provider, &raw_tool_name, &category, args),
+                    details: build_safe_tool_details(
+                        provider,
+                        &raw_tool_name,
+                        &category,
+                        args,
+                        schema,
+                    ),
                     duration_ms: None,
                 },
             );
@@ -993,12 +1588,8 @@ fn summarize_events(
                     turn_id,
                 },
             );
-        } else if event_type == "tool.execution_complete" {
-            let success = value
-                .get("data")
-                .and_then(|data| data.get("success"))
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
+        } else if event_type == schema.events.tool_complete {
+            let success = bool_from_paths(&value, &schema.events.success_paths).unwrap_or(true);
             let completion_category = if success { "complete" } else { "alert" };
             record_last_event(summary, &timestamp, event_type, completion_category);
             recent_events.push(AgentEventSummary {
@@ -1020,7 +1611,7 @@ fn summarize_events(
             // for the dev — they're normal LLM exploration — so they
             // don't bump error_count and don't turn the session red.
             let complete_key =
-                raw_tool_call_id(&value).unwrap_or_else(|| summary.last_tool.clone());
+                raw_tool_call_id(&value, schema).unwrap_or_else(|| summary.last_tool.clone());
             if let Some(start) = pending_starts.remove(&complete_key) {
                 let duration_ms = parse_iso_ms(&timestamp)
                     .zip(parse_iso_ms(&start.timestamp))
@@ -1063,19 +1654,15 @@ fn summarize_events(
             // in the window. Counting those would re-flag every long-
             // running session as needs-attention purely from tail
             // truncation, even when the live work is fine.
-        } else if event_type == "assistant.message" {
+        } else if event_type == schema.events.assistant_message {
             // Copilot's `assistant.message` carries `outputTokens` per
             // message but not `inputTokens` in practice — input token
             // counts are reported at session.shutdown via tokenDetails
             // (see below), so trying to accumulate them here would
             // silently stay at zero anyway.
-            if let Some(tokens) = value
-                .get("data")
-                .and_then(|data| data.get("outputTokens"))
-                .and_then(|v| v.as_u64())
-            {
+            if let Some(tokens) = u64_from_paths(&value, &schema.events.output_token_paths) {
                 summary.output_tokens += tokens;
-                let turn_id = raw_event_turn_id(&value)
+                let turn_id = raw_event_turn_id(&value, schema)
                     .map(|id| safe_ref_id("turn", &id))
                     .or_else(|| active_turn_id.clone());
                 if let Some(turn_id) = turn_id {
@@ -1088,20 +1675,26 @@ fn summarize_events(
                     }
                 }
             }
-        } else if event_type == "session.compaction_complete" || event_type == "session.shutdown" {
+        } else if schema
+            .token_events
+            .iter()
+            .any(|token| token.event_type == event_type)
+        {
             // Token aggregation is shared with the head-pass helper
             // (`fold_skipped_token_events`) so the same accounting rules
             // apply whether the event lands in the 8 MiB tail or in the
             // earlier portion of a long-running file. See the helper's
             // doc for the cache_read / cache_write semantics.
-            apply_token_event(&value, event_type, summary);
-        } else if matches!(
-            event_type,
-            "assistant.turn_start" | "assistant.turn_end" | "user.message" | "session.start"
-        ) {
-            if event_type == "assistant.turn_start" {
+            apply_token_event(&value, event_type, summary, schema);
+        } else if event_type == schema.events.assistant_turn_start
+            || event_type == schema.events.assistant_turn_end
+            || event_type == schema.events.user_message
+            || event_type == schema.events.session_start
+        {
+            if event_type == schema.events.assistant_turn_start {
                 summary.turn_count += 1;
-                let raw_turn = raw_event_turn_id(&value).unwrap_or_else(|| timestamp.clone());
+                let raw_turn =
+                    raw_event_turn_id(&value, schema).unwrap_or_else(|| timestamp.clone());
                 let turn_id = safe_ref_id("turn", &raw_turn);
                 active_turn_id = Some(turn_id.clone());
                 let turn = ensure_turn(&mut turns, &mut turn_order, &turn_id, &timestamp, false);
@@ -1109,8 +1702,8 @@ fn summarize_events(
                 if turn.model.is_empty() {
                     turn.model = current_model.clone();
                 }
-            } else if event_type == "assistant.turn_end" {
-                let turn_id = raw_event_turn_id(&value)
+            } else if event_type == schema.events.assistant_turn_end {
+                let turn_id = raw_event_turn_id(&value, schema)
                     .map(|id| safe_ref_id("turn", &id))
                     .or_else(|| active_turn_id.clone());
                 if let Some(turn_id) = turn_id {
@@ -1143,6 +1736,46 @@ fn summarize_events(
         .filter_map(|id| turns.get(id))
         .map(TurnBuilder::to_summary)
         .collect();
+}
+
+fn value_at_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+    let mut current = value;
+    for segment in path.split('.') {
+        if segment.is_empty() {
+            return None;
+        }
+        current = current.get(segment)?;
+    }
+    Some(current)
+}
+
+fn value_from_paths<'a>(
+    value: &'a serde_json::Value,
+    paths: &[String],
+) -> Option<&'a serde_json::Value> {
+    paths.iter().find_map(|path| value_at_path(value, path))
+}
+
+fn string_from_paths(value: &serde_json::Value, paths: &[String]) -> Option<String> {
+    value_from_paths(value, paths)
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn bool_from_paths(value: &serde_json::Value, paths: &[String]) -> Option<bool> {
+    value_from_paths(value, paths).and_then(|value| value.as_bool())
+}
+
+fn u64_from_paths(value: &serde_json::Value, paths: &[String]) -> Option<u64> {
+    value_from_paths(value, paths).and_then(|value| value.as_u64())
+}
+
+fn sum_token_components(value: &serde_json::Value, paths: &[String]) -> u64 {
+    paths
+        .iter()
+        .filter_map(|path| value_at_path(value, path).and_then(|value| value.as_u64()))
+        .sum()
 }
 
 /// Apply the token deltas from a single `session.compaction_complete`
@@ -1178,45 +1811,29 @@ fn apply_token_event(
     value: &serde_json::Value,
     event_type: &str,
     summary: &mut AgentSessionSummary,
+    schema: &ProviderSchema,
 ) {
-    match event_type {
-        "session.compaction_complete" => {
-            if let Some(used) = value
-                .get("data")
-                .and_then(|d| d.get("compactionTokensUsed"))
-            {
-                if let Some(n) = used.get("inputTokens").and_then(|v| v.as_u64()) {
-                    summary.input_tokens += n;
-                }
-                if let Some(n) = used.get("outputTokens").and_then(|v| v.as_u64()) {
-                    summary.output_tokens += n;
-                }
-            }
+    let Some(rule) = schema
+        .token_events
+        .iter()
+        .find(|rule| rule.event_type == event_type)
+    else {
+        return;
+    };
+
+    let input = sum_token_components(value, &rule.input_components);
+    let output = sum_token_components(value, &rule.output_components);
+    match rule.mode.as_str() {
+        "additive" => {
+            summary.input_tokens += input;
+            summary.output_tokens += output;
         }
-        "session.shutdown" => {
-            if let Some(details) = value.get("data").and_then(|d| d.get("tokenDetails")) {
-                let fresh = details
-                    .get("input")
-                    .and_then(|v| v.get("tokenCount"))
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                let cache_write = details
-                    .get("cache_write")
-                    .and_then(|v| v.get("tokenCount"))
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                let total_in = fresh + cache_write;
-                if total_in > summary.input_tokens {
-                    summary.input_tokens = total_in;
-                }
-                let out = details
-                    .get("output")
-                    .and_then(|v| v.get("tokenCount"))
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                if out > summary.output_tokens {
-                    summary.output_tokens = out;
-                }
+        "cumulative_max" => {
+            if input > summary.input_tokens {
+                summary.input_tokens = input;
+            }
+            if output > summary.output_tokens {
+                summary.output_tokens = output;
             }
         }
         _ => {}
@@ -1235,19 +1852,31 @@ fn apply_token_event(
 /// cost is essentially free for the 99%+ of events that aren't token
 /// events. On a 163 MB file with 42 compactions this completes in
 /// well under a second.
-fn fold_skipped_token_events<R: BufRead>(reader: R, summary: &mut AgentSessionSummary) {
+fn fold_skipped_token_events<R: BufRead>(
+    reader: R,
+    summary: &mut AgentSessionSummary,
+    schema: &ProviderSchema,
+) {
     for line in reader.lines().map_while(Result::ok) {
-        let is_compaction = line.contains("\"session.compaction_complete\"");
-        let is_shutdown = line.contains("\"session.shutdown\"");
-        if !is_compaction && !is_shutdown {
+        if !schema
+            .token_events
+            .iter()
+            .any(|token| line.contains(&format!("\"{}\"", token.event_type)))
+        {
             continue;
         }
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
-        let event_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        if event_type == "session.compaction_complete" || event_type == "session.shutdown" {
-            apply_token_event(&value, event_type, summary);
+        let event_type =
+            string_from_paths(&value, &schema.events.event_type_paths).unwrap_or_default();
+        let event_type = event_type.as_str();
+        if schema
+            .token_events
+            .iter()
+            .any(|token| token.event_type == event_type)
+        {
+            apply_token_event(&value, event_type, summary, schema);
         }
     }
 }
@@ -1324,22 +1953,12 @@ fn record_last_event(
     }
 }
 
-fn raw_event_turn_id(value: &serde_json::Value) -> Option<String> {
-    value
-        .get("data")
-        .and_then(|data| data.get("turnId").or_else(|| data.get("turn_id")))
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
+fn raw_event_turn_id(value: &serde_json::Value, schema: &ProviderSchema) -> Option<String> {
+    string_from_paths(value, &schema.events.turn_id_paths)
 }
 
-fn raw_tool_call_id(value: &serde_json::Value) -> Option<String> {
-    value
-        .get("data")
-        .and_then(|data| data.get("toolCallId").or_else(|| data.get("tool_call_id")))
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
+fn raw_tool_call_id(value: &serde_json::Value, schema: &ProviderSchema) -> Option<String> {
+    string_from_paths(value, &schema.events.tool_call_id_paths)
 }
 
 fn safe_ref_id(prefix: &str, raw: &str) -> String {
@@ -1374,30 +1993,20 @@ fn classify_tool(
     raw_name: &str,
     args: Option<&serde_json::Value>,
     mcp_allowlist: &HashSet<String>,
+    schema: &ProviderSchema,
 ) -> (String, String) {
-    // Meta-tools like `skill` and `task` carry their real identity in
-    // their arguments (skill name, sub-agent type). Surfacing those
-    // identifiers makes the activity feed and tool ranking actually
-    // useful. We sanitize only the static identifier fields — no prompt
-    // text or other args cross the boundary.
     let lower = raw_name.to_ascii_lowercase();
-    if lower == "skill" {
-        let skill_name = args
-            .and_then(|a| a.get("skill"))
-            .and_then(|v| v.as_str())
-            .map(|value| sanitize_identifier(value, "skill"))
-            .unwrap_or_else(|| "skill".to_string());
-        return (skill_name, "skills".to_string());
+    for rule in &schema.tool_identity_rules {
+        if lower == rule.tool.to_ascii_lowercase() {
+            let fallback = sanitize_identifier(&rule.fallback, "tool");
+            let identity = args
+                .and_then(|arguments| string_from_paths(arguments, &rule.target_paths))
+                .map(|value| sanitize_identifier(&value, &fallback))
+                .unwrap_or(fallback);
+            return (identity, rule.category.clone());
+        }
     }
-    if lower == "task" {
-        let subagent = args
-            .and_then(|a| a.get("subagent_type"))
-            .and_then(|v| v.as_str())
-            .map(|value| sanitize_identifier(value, "task"))
-            .unwrap_or_else(|| "task".to_string());
-        return (subagent, "delegates".to_string());
-    }
-    let category = categorize_tool(raw_name, mcp_allowlist).to_string();
+    let category = categorize_tool(raw_name, mcp_allowlist, schema);
     (sanitize_identifier(raw_name, "tool"), category)
 }
 
@@ -1406,20 +2015,27 @@ fn build_safe_tool_details(
     raw_name: &str,
     category: &str,
     args: Option<&serde_json::Value>,
+    schema: &ProviderSchema,
 ) -> Vec<SafeDetail> {
     let mut details = vec![
         safe_detail("Type", detail_kind(category)),
         safe_detail("Provider", provider),
         safe_detail("Privacy", "arguments/output hidden"),
     ];
-    if raw_name.eq_ignore_ascii_case("task") {
-        if let Some(mode) = args
-            .and_then(|a| a.get("mode"))
-            .and_then(|v| v.as_str())
-            .map(|value| sanitize_identifier(value, ""))
-            .filter(|value| !value.is_empty())
-        {
-            details.push(safe_detail("Mode", &mode));
+    let lower = raw_name.to_ascii_lowercase();
+    if let Some(rule) = schema
+        .tool_identity_rules
+        .iter()
+        .find(|rule| lower == rule.tool.to_ascii_lowercase())
+    {
+        for detail_rule in &rule.safe_details {
+            if let Some(value) = args
+                .and_then(|arguments| string_from_paths(arguments, &detail_rule.paths))
+                .map(|value| sanitize_identifier(&value, &detail_rule.fallback))
+                .filter(|value| !value.is_empty())
+            {
+                details.push(safe_detail(&detail_rule.label, &value));
+            }
         }
     }
     details
@@ -1454,23 +2070,24 @@ fn safe_detail(label: &str, value: &str) -> SafeDetail {
 /// if the file is missing or malformed — categorization then falls
 /// back to the hyphen/`mcp` substring heuristic alone, which is the
 /// pre-allowlist behavior.
-fn load_mcp_tool_allowlist() -> HashSet<String> {
+fn load_mcp_tool_allowlist(schema: &ProviderSchema) -> HashSet<String> {
     let mut allowlist = HashSet::new();
     let Some(home) = home_dir() else {
         return allowlist;
     };
-    let path = home.join(".copilot").join("m-mcp-servers.json");
+    let path = path_from_home(&home, &schema.mcp.allowlist_path);
     let Ok(raw) = fs::read_to_string(&path) else {
         return allowlist;
     };
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
         return allowlist;
     };
-    let Some(servers) = value.get("servers").and_then(|v| v.as_object()) else {
+    let Some(servers) = value_at_path(&value, &schema.mcp.servers_path).and_then(|v| v.as_object())
+    else {
         return allowlist;
     };
     for (_server, info) in servers {
-        let Some(tools) = info.get("tools").and_then(|v| v.as_array()) else {
+        let Some(tools) = info.get(&schema.mcp.tools_key).and_then(|v| v.as_array()) else {
             continue;
         };
         for tool in tools {
@@ -1482,93 +2099,32 @@ fn load_mcp_tool_allowlist() -> HashSet<String> {
     allowlist
 }
 
-fn categorize_tool(tool_name: &str, mcp_allowlist: &HashSet<String>) -> &'static str {
+fn categorize_tool(
+    tool_name: &str,
+    mcp_allowlist: &HashSet<String>,
+    schema: &ProviderSchema,
+) -> String {
     let name = tool_name.to_ascii_lowercase();
-    // 1. Authoritative MCP allowlist from ~/.copilot/m-mcp-servers.json.
-    //    Catches underscore-only MCP tool names (Playwright's
-    //    browser_close / browser_navigate / browser_evaluate / ...,
-    //    presentation server's add_slide_from_code, etc.) that the
-    //    pattern heuristic below would miss.
-    if mcp_allowlist.contains(&name) {
-        return "mcp";
+    for rule in &schema.tool_category_rules {
+        if rule.mcp_allowlist && mcp_allowlist.contains(&name) {
+            return rule.category.clone();
+        }
+        if rule
+            .exact
+            .iter()
+            .any(|candidate| name == candidate.to_ascii_lowercase())
+        {
+            return rule.category.clone();
+        }
+        if rule
+            .contains
+            .iter()
+            .any(|candidate| name.contains(&candidate.to_ascii_lowercase()))
+        {
+            return rule.category.clone();
+        }
     }
-    // 2. Pattern heuristic for MCP tools not enumerated in the config
-    //    (wildcard tool registrations, MCP servers that connected
-    //    after the config was last read, etc.). Copilot CLI's native
-    //    tools all use single words or underscore_only names; anything
-    //    with a hyphen, or with "mcp" in the name, is overwhelmingly
-    //    an MCP server tool (github-mcp-server-*, context7-*,
-    //    kit-dev-mcp-*, io-github-ChromeDevTools-..., azure-pricing,
-    //    ide-get_diagnostics, ...) and belongs in its own bucket
-    //    regardless of what verb it happens to use.
-    if name.contains("mcp") || name.contains('-') {
-        return "mcp";
-    }
-    // 3. Composite / suffix patterns FIRST so wrapper tools route to
-    //    the quarter that matches the work they actually do. Without
-    //    this ordering, `read_bash` matches "read" -> library (wrong)
-    //    instead of "bash" -> terminal; `write_agent` matches "write"
-    //    -> forge (wrong) instead of "agent" -> delegates;
-    //    `web_search` matches "search" -> library (wrong) instead of
-    //    "web" -> signal.
-    if name.contains("bash")
-        || name.contains("shell")
-        || name.contains("sql")
-        || name.contains("test")
-    {
-        return "terminal";
-    }
-    if name.contains("agent") || name.contains("task") {
-        return "delegates";
-    }
-    if name.contains("web")
-        || name.contains("fetch")
-        || name.contains("docs")
-        || name.contains("github")
-    {
-        return "signal";
-    }
-    // 4. Verb-only patterns for the remaining single-word native tools.
-    if name.contains("edit")
-        || name.contains("create")
-        || name.contains("apply_patch")
-        || name.contains("write")
-    {
-        return "forge";
-    }
-    if name.contains("view")
-        || name.contains("read")
-        || name.contains("grep")
-        || name.contains("rg")
-        || name.contains("glob")
-        || name.contains("search")
-    {
-        return "library";
-    }
-    // 5. Meta / control tools. Knowledge stores (store_memory,
-    //    vote_memory, ...) live in Tome Hall alongside skills since
-    //    both represent learned/persisted state the agent carries
-    //    forward. Planning, intent, scheduling, and "exit plan mode"
-    //    live in Royal Court — the dev-facing "what should we do
-    //    next" bucket.
-    if name.contains("skill") || name.contains("memory") {
-        return "skills";
-    }
-    if name.contains("ask")
-        || name.contains("intent")
-        || name.contains("plan")
-        || name.contains("schedule")
-    {
-        return "court";
-    }
-    // 6. Final fallback: Royal Court is the dev-facing "control"
-    //    quarter and is the closest analogue for an unrecognized meta
-    //    tool. We deliberately do NOT fall back to "workshop" —
-    //    that produced invisible tool calls (no pulse, no quarter
-    //    count, no drill-down listing) for any future tool we didn't
-    //    enumerate above. Routing to an existing quarter keeps every
-    //    tool call visible somewhere on the map.
-    "court"
+    schema.fallback_category.clone()
 }
 
 fn categorize_event(event_type: &str) -> &'static str {
@@ -1591,6 +2147,8 @@ fn categorize_event(event_type: &str) -> &'static str {
 /// lifetime and is dropped automatically on shutdown.
 pub fn start_watcher(app: AppHandle) {
     let providers = default_providers();
+    let (schema, _) = load_copilot_schema();
+    let relevant_files = schema.session.relevant_files.clone();
     let mut watch_targets: Vec<(PathBuf, RecursiveMode)> = Vec::new();
 
     for provider in providers {
@@ -1646,7 +2204,11 @@ pub fn start_watcher(app: AppHandle) {
             // Avoids needless rescans on rewind-snapshots, sqlite
             // journals, and other noise inside session dirs.
             let Ok(event) = event else { continue };
-            if !event.paths.iter().any(|p| is_relevant_path(p)) {
+            if !event
+                .paths
+                .iter()
+                .any(|p| is_relevant_path(p, &relevant_files))
+            {
                 continue;
             }
 
@@ -1676,9 +2238,9 @@ pub fn start_watcher(app: AppHandle) {
 /// `events.jsonl` per session for activity and `workspace.yaml` for
 /// session metadata (title, repository, branch). Everything else in a
 /// session dir (sqlite journals, rewind snapshots, etc.) is ignored.
-fn is_relevant_path(path: &Path) -> bool {
+fn is_relevant_path(path: &Path, relevant_files: &[String]) -> bool {
     match path.file_name().and_then(|n| n.to_str()) {
-        Some("events.jsonl") | Some("workspace.yaml") => true,
+        Some(name) => relevant_files.iter().any(|candidate| candidate == name),
         _ => false,
     }
 }
@@ -1686,6 +2248,141 @@ fn is_relevant_path(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_schema() -> ProviderSchema {
+        parse_provider_schema(BUNDLED_COPILOT_SCHEMA).expect("bundled schema")
+    }
+
+    #[test]
+    fn bundled_provider_schema_parses_and_validates() {
+        let schema = test_schema();
+        assert_eq!(schema.provider, "copilot");
+        assert_eq!(schema.schema_version, "1.0.0");
+        assert!(schema
+            .session
+            .relevant_files
+            .contains(&"events.jsonl".to_string()));
+    }
+
+    #[test]
+    fn published_provider_schema_matches_bundled_schema() {
+        let published = include_str!("../../docs/provider-schemas/copilot/1.0.0.json");
+        assert_eq!(published, BUNDLED_COPILOT_SCHEMA);
+        assert_eq!(
+            sha256_hex(published),
+            "cc1689eaee48b77289c34d9d30faf358dbadb614dae6b4ed6ff0cf0354c31f97"
+        );
+    }
+
+    #[test]
+    fn schema_index_selects_newest_compatible_version() {
+        let entries = vec![
+            RemoteSchemaEntry {
+                version: "1.0.0".to_string(),
+                url: "1.0.0.json".to_string(),
+                sha256: "a".to_string(),
+            },
+            RemoteSchemaEntry {
+                version: "1.2.0".to_string(),
+                url: "1.2.0.json".to_string(),
+                sha256: "b".to_string(),
+            },
+            RemoteSchemaEntry {
+                version: "2.0.0".to_string(),
+                url: "2.0.0.json".to_string(),
+                sha256: "c".to_string(),
+            },
+        ];
+
+        let entry = newest_compatible_schema_entry(&entries, "1.0.0").expect("entry");
+        assert_eq!(entry.version, "1.2.0");
+    }
+
+    #[test]
+    fn schema_index_ignores_versions_not_newer_than_bundled() {
+        let entries = vec![RemoteSchemaEntry {
+            version: "1.0.0".to_string(),
+            url: "1.0.0.json".to_string(),
+            sha256: "a".to_string(),
+        }];
+
+        assert!(newest_compatible_schema_entry(&entries, "1.0.0").is_none());
+    }
+
+    #[test]
+    fn provider_schema_rejects_unsafe_surfaced_paths() {
+        let raw = BUNDLED_COPILOT_SCHEMA.replace(
+            r#""target_paths": ["skill"]"#,
+            r#""target_paths": ["prompt"]"#,
+        );
+        let err = match parse_provider_schema(&raw) {
+            Ok(_) => panic!("unsafe schema must fail validation"),
+            Err(err) => err,
+        };
+        assert!(err.contains("unsafe surfaced identity path"));
+    }
+
+    #[test]
+    fn provider_schema_rejects_unsafe_event_paths() {
+        let raw = BUNDLED_COPILOT_SCHEMA.replace(
+            r#""timestamp_paths": ["timestamp"]"#,
+            r#""timestamp_paths": ["data.prompt"]"#,
+        );
+        let err = match parse_provider_schema(&raw) {
+            Ok(_) => panic!("unsafe schema must fail validation"),
+            Err(err) => err,
+        };
+        assert!(err.contains("unsafe timestamp path"));
+    }
+
+    #[test]
+    fn provider_schema_rejects_unsafe_arguments_paths() {
+        let raw = BUNDLED_COPILOT_SCHEMA.replace(
+            r#""arguments_paths": ["data.arguments"]"#,
+            r#""arguments_paths": ["data.prompt.arguments"]"#,
+        );
+        let err = match parse_provider_schema(&raw) {
+            Ok(_) => panic!("unsafe arguments path must fail validation"),
+            Err(err) => err,
+        };
+        assert!(err.contains("unsafe arguments path"));
+    }
+
+    #[test]
+    fn schema_url_resolution_rejects_encoded_or_external_paths() {
+        let index_url =
+            "https://danwahlin.github.io/copilot-mission-control/provider-schemas/copilot/index.json";
+
+        assert!(resolve_schema_url(index_url, "1.0.1.json").is_ok());
+        assert!(resolve_schema_url(index_url, "nested/1.0.1.json").is_ok());
+        assert!(resolve_schema_url(index_url, "../1.0.1.json").is_err());
+        assert!(resolve_schema_url(index_url, "%2e%2e/1.0.1.json").is_err());
+        assert!(resolve_schema_url(index_url, "https://example.com/1.0.1.json").is_err());
+    }
+
+    #[test]
+    fn cached_schema_requires_matching_checksum_sidecar() {
+        use std::io::Write;
+        let mut path = std::env::temp_dir();
+        path.push("cmc_cached_schema_test.json");
+        let checksum_path = path.with_extension("sha256");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&checksum_path);
+
+        let raw = BUNDLED_COPILOT_SCHEMA;
+        std::fs::File::create(&path)
+            .and_then(|mut file| file.write_all(raw.as_bytes()))
+            .expect("write cached schema");
+
+        assert!(!cached_schema_checksum_valid(&path, raw));
+        std::fs::write(&checksum_path, sha256_hex(raw)).expect("write checksum");
+        assert!(cached_schema_checksum_valid(&path, raw));
+        std::fs::write(&checksum_path, "bad").expect("write bad checksum");
+        assert!(!cached_schema_checksum_valid(&path, raw));
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&checksum_path);
+    }
 
     /// Build a synthetic `ProviderScan` containing only the supplied
     /// tool counts. Other fields are zeroed out — these tests only
@@ -1842,16 +2539,23 @@ mod tests {
     /// that and route them to "mcp".
     #[test]
     fn mcp_allowlist_routes_underscore_only_tools() {
+        let schema = test_schema();
         let mut allowlist = HashSet::new();
         allowlist.insert("browser_close".to_string());
         allowlist.insert("browser_navigate".to_string());
         allowlist.insert("add_slide_from_code".to_string());
 
-        assert_eq!(categorize_tool("browser_close", &allowlist), "mcp");
-        assert_eq!(categorize_tool("browser_navigate", &allowlist), "mcp");
-        assert_eq!(categorize_tool("add_slide_from_code", &allowlist), "mcp");
+        assert_eq!(categorize_tool("browser_close", &allowlist, &schema), "mcp");
+        assert_eq!(
+            categorize_tool("browser_navigate", &allowlist, &schema),
+            "mcp"
+        );
+        assert_eq!(
+            categorize_tool("add_slide_from_code", &allowlist, &schema),
+            "mcp"
+        );
         // Case-insensitive match.
-        assert_eq!(categorize_tool("Browser_Close", &allowlist), "mcp");
+        assert_eq!(categorize_tool("Browser_Close", &allowlist, &schema), "mcp");
     }
 
     /// Tools NOT in the allowlist and without hyphen/`mcp` markers
@@ -1859,14 +2563,18 @@ mod tests {
     /// tools land in their proper quarters).
     #[test]
     fn empty_allowlist_falls_back_to_heuristics() {
+        let schema = test_schema();
         let allowlist = HashSet::new();
         // Native Copilot tools — should hit the verb-based branches,
         // not "mcp".
-        assert_eq!(categorize_tool("bash", &allowlist), "terminal");
-        assert_eq!(categorize_tool("view", &allowlist), "library");
-        assert_eq!(categorize_tool("edit", &allowlist), "forge");
+        assert_eq!(categorize_tool("bash", &allowlist, &schema), "terminal");
+        assert_eq!(categorize_tool("view", &allowlist, &schema), "library");
+        assert_eq!(categorize_tool("edit", &allowlist, &schema), "forge");
         // Hyphenated tool still routes to mcp via the heuristic.
-        assert_eq!(categorize_tool("github-mcp-server-list", &allowlist), "mcp");
+        assert_eq!(
+            categorize_tool("github-mcp-server-list", &allowlist, &schema),
+            "mcp"
+        );
     }
 
     /// Wrapper tools whose name combines a verb prefix with the
@@ -1878,23 +2586,48 @@ mod tests {
     /// "bash"/"agent"/"web".
     #[test]
     fn composite_names_beat_verb_prefixes() {
+        let schema = test_schema();
         let allowlist = HashSet::new();
         // *_bash / *_shell / *_sql / *_test should all land in terminal,
         // not in forge (write) or library (read) just because of the
         // prefix verb.
-        assert_eq!(categorize_tool("read_bash", &allowlist), "terminal");
-        assert_eq!(categorize_tool("write_bash", &allowlist), "terminal");
-        assert_eq!(categorize_tool("stop_bash", &allowlist), "terminal");
-        assert_eq!(categorize_tool("list_bash", &allowlist), "terminal");
+        assert_eq!(
+            categorize_tool("read_bash", &allowlist, &schema),
+            "terminal"
+        );
+        assert_eq!(
+            categorize_tool("write_bash", &allowlist, &schema),
+            "terminal"
+        );
+        assert_eq!(
+            categorize_tool("stop_bash", &allowlist, &schema),
+            "terminal"
+        );
+        assert_eq!(
+            categorize_tool("list_bash", &allowlist, &schema),
+            "terminal"
+        );
         // *_agent should land in delegates (Guild Hall) since the
         // tool drives a sub-agent, not in library/forge.
-        assert_eq!(categorize_tool("read_agent", &allowlist), "delegates");
-        assert_eq!(categorize_tool("write_agent", &allowlist), "delegates");
-        assert_eq!(categorize_tool("list_agents", &allowlist), "delegates");
-        assert_eq!(categorize_tool("stop_agent", &allowlist), "delegates");
+        assert_eq!(
+            categorize_tool("read_agent", &allowlist, &schema),
+            "delegates"
+        );
+        assert_eq!(
+            categorize_tool("write_agent", &allowlist, &schema),
+            "delegates"
+        );
+        assert_eq!(
+            categorize_tool("list_agents", &allowlist, &schema),
+            "delegates"
+        );
+        assert_eq!(
+            categorize_tool("stop_agent", &allowlist, &schema),
+            "delegates"
+        );
         // web_search is a web tool — Signal Tower, not Library.
-        assert_eq!(categorize_tool("web_search", &allowlist), "signal");
-        assert_eq!(categorize_tool("web_fetch", &allowlist), "signal");
+        assert_eq!(categorize_tool("web_search", &allowlist, &schema), "signal");
+        assert_eq!(categorize_tool("web_fetch", &allowlist, &schema), "signal");
     }
 
     /// Built-in meta/control tools (vote_memory, store_memory,
@@ -1905,34 +2638,63 @@ mod tests {
     /// flew to any quarter. They must route to a quarter that exists.
     #[test]
     fn meta_control_tools_land_in_a_real_quarter() {
+        let schema = test_schema();
         let allowlist = HashSet::new();
         // Memory tools = persisted knowledge = Tome Hall (skills).
-        assert_eq!(categorize_tool("store_memory", &allowlist), "skills");
-        assert_eq!(categorize_tool("vote_memory", &allowlist), "skills");
+        assert_eq!(
+            categorize_tool("store_memory", &allowlist, &schema),
+            "skills"
+        );
+        assert_eq!(
+            categorize_tool("vote_memory", &allowlist, &schema),
+            "skills"
+        );
         // Plan/schedule/intent = Royal Court (dev-facing control).
-        assert_eq!(categorize_tool("exit_plan_mode", &allowlist), "court");
-        assert_eq!(categorize_tool("manage_schedule", &allowlist), "court");
-        assert_eq!(categorize_tool("ask_user", &allowlist), "court");
-        assert_eq!(categorize_tool("report_intent", &allowlist), "court");
+        assert_eq!(
+            categorize_tool("exit_plan_mode", &allowlist, &schema),
+            "court"
+        );
+        assert_eq!(
+            categorize_tool("manage_schedule", &allowlist, &schema),
+            "court"
+        );
+        assert_eq!(categorize_tool("ask_user", &allowlist, &schema), "court");
+        assert_eq!(
+            categorize_tool("report_intent", &allowlist, &schema),
+            "court"
+        );
     }
 
     #[test]
     fn skill_and_subagent_identifiers_are_sanitized() {
+        let schema = test_schema();
         let allowlist = HashSet::new();
         let args = serde_json::json!({
             "skill": "secret prompt /Users/dan/.env",
-            "subagent_type": "code-reviewer",
+            "agent_type": "code-reviewer",
+            "name": "schema-review",
+            "mode": "background",
             "prompt": "do not expose me"
         });
 
         assert_eq!(
-            classify_tool("skill", Some(&args), &allowlist),
+            classify_tool("skill", Some(&args), &allowlist, &schema),
             ("skill".to_string(), "skills".to_string())
         );
         assert_eq!(
-            classify_tool("task", Some(&args), &allowlist),
+            classify_tool("task", Some(&args), &allowlist, &schema),
             ("code-reviewer".to_string(), "delegates".to_string())
         );
+        let details = build_safe_tool_details("test", "task", "delegates", Some(&args), &schema);
+        assert!(details
+            .iter()
+            .any(|detail| detail.label == "Agent type" && detail.value == "code-reviewer"));
+        assert!(details
+            .iter()
+            .any(|detail| detail.label == "Agent name" && detail.value == "schema-review"));
+        assert!(details
+            .iter()
+            .any(|detail| detail.label == "Mode" && detail.value == "background"));
     }
 
     #[test]
@@ -1960,7 +2722,7 @@ mod tests {
             .unwrap();
             writeln!(
                 f,
-                r#"{{"type":"tool.execution_start","timestamp":"2026-01-01T00:00:03.000Z","data":{{"toolName":"task","toolCallId":"call-task","turnId":"turn-alpha","arguments":{{"subagent_type":"code-reviewer","mode":"background","prompt":"SECRET_TASK"}}}}}}"#
+                r#"{{"type":"tool.execution_start","timestamp":"2026-01-01T00:00:03.000Z","data":{{"toolName":"task","toolCallId":"call-task","turnId":"turn-alpha","arguments":{{"agent_type":"code-reviewer","name":"schema-review","mode":"background","prompt":"SECRET_TASK"}}}}}}"#
             )
             .unwrap();
             writeln!(
@@ -1984,6 +2746,7 @@ mod tests {
         let mut tool_counts = BTreeMap::new();
         let mut recent_events = Vec::new();
         let allowlist = HashSet::new();
+        let schema = test_schema();
         summarize_events(
             "test",
             &path,
@@ -1992,6 +2755,7 @@ mod tests {
             &mut tool_counts,
             &mut recent_events,
             &allowlist,
+            &schema,
         );
 
         assert_eq!(summary.recent_tool_calls.len(), 2);
@@ -2001,6 +2765,10 @@ mod tests {
         assert_eq!(summary.recent_tool_calls[1].tool, "code-reviewer");
         assert_eq!(summary.recent_tool_calls[1].category, "delegates");
         assert!(!summary.recent_tool_calls[1].success);
+        assert!(summary.recent_tool_calls[1]
+            .details
+            .iter()
+            .any(|detail| detail.label == "Agent name" && detail.value == "schema-review"));
 
         assert_eq!(summary.recent_turns.len(), 1);
         let turn = &summary.recent_turns[0];
@@ -2045,6 +2813,7 @@ mod tests {
         let mut tool_counts = BTreeMap::new();
         let mut recent_events = Vec::new();
         let allowlist = HashSet::new();
+        let schema = test_schema();
         summarize_events(
             "test",
             &path,
@@ -2053,6 +2822,7 @@ mod tests {
             &mut tool_counts,
             &mut recent_events,
             &allowlist,
+            &schema,
         );
 
         assert_eq!(summary.recent_turns.len(), 1);
@@ -2097,6 +2867,7 @@ mod tests {
         let mut tool_counts = BTreeMap::new();
         let mut recent_events = Vec::new();
         let allowlist = HashSet::new();
+        let schema = test_schema();
         summarize_events(
             "test",
             &path,
@@ -2105,6 +2876,7 @@ mod tests {
             &mut tool_counts,
             &mut recent_events,
             &allowlist,
+            &schema,
         );
 
         // Fresh + cache_write = 100_000 + 10_000_000 = 10_100_000.
@@ -2144,6 +2916,7 @@ mod tests {
         let mut tool_counts = BTreeMap::new();
         let mut recent_events = Vec::new();
         let allowlist = HashSet::new();
+        let schema = test_schema();
         summarize_events(
             "test",
             &path,
@@ -2152,6 +2925,7 @@ mod tests {
             &mut tool_counts,
             &mut recent_events,
             &allowlist,
+            &schema,
         );
 
         assert_eq!(summary.last_event_kind, "tool.execution_start");
@@ -2185,7 +2959,8 @@ mod tests {
             "\n",
         );
         let mut summary = AgentSessionSummary::default();
-        fold_skipped_token_events(std::io::Cursor::new(input), &mut summary);
+        let schema = test_schema();
+        fold_skipped_token_events(std::io::Cursor::new(input), &mut summary, &schema);
         assert_eq!(
             summary.input_tokens, 550_000,
             "shutdown must replace running compaction sum when larger"
@@ -2239,6 +3014,7 @@ mod tests {
         let mut tool_counts = BTreeMap::new();
         let mut recent_events = Vec::new();
         let allowlist = HashSet::new();
+        let schema = test_schema();
         summarize_events(
             "test",
             &path,
@@ -2247,6 +3023,7 @@ mod tests {
             &mut tool_counts,
             &mut recent_events,
             &allowlist,
+            &schema,
         );
 
         assert_eq!(
@@ -2264,6 +3041,7 @@ mod tests {
     /// should ever be invisible on the mission map.
     #[test]
     fn every_observed_builtin_routes_to_a_known_quarter() {
+        let schema = test_schema();
         let allowlist = HashSet::new();
         const QUARTERS: &[&str] = &[
             "forge",
@@ -2305,9 +3083,9 @@ mod tests {
             "tool_search_tool_regex",
         ];
         for tool in tools {
-            let cat = categorize_tool(tool, &allowlist);
+            let cat = categorize_tool(tool, &allowlist, &schema);
             assert!(
-                QUARTERS.contains(&cat),
+                QUARTERS.contains(&cat.as_str()),
                 "tool {tool} -> {cat}, which is not a real quarter"
             );
         }

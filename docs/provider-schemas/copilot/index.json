@@ -1,0 +1,11 @@
+{
+  "schema_index_version": 1,
+  "provider": "copilot",
+  "schemas": [
+    {
+      "version": "1.0.0",
+      "url": "1.0.0.json",
+      "sha256": "cc1689eaee48b77289c34d9d30faf358dbadb614dae6b4ed6ff0cf0354c31f97"
+    }
+  ]
+}

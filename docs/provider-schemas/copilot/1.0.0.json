@@ -1,0 +1,102 @@
+{
+  "schema_version": "1.0.0",
+  "provider": "copilot",
+  "state_root": [".copilot", "session-state"],
+  "session": {
+    "events_files": ["events.jsonl"],
+    "workspace_files": ["workspace.yaml"],
+    "relevant_files": ["events.jsonl", "workspace.yaml"]
+  },
+  "workspace": {
+    "allowed_keys": ["id", "repository", "branch", "summary", "git_root", "updated_at"]
+  },
+  "events": {
+    "event_type_paths": ["type"],
+    "tool_start": "tool.execution_start",
+    "tool_complete": "tool.execution_complete",
+    "assistant_message": "assistant.message",
+    "assistant_turn_start": "assistant.turn_start",
+    "assistant_turn_end": "assistant.turn_end",
+    "user_message": "user.message",
+    "session_start": "session.start",
+    "ignore_as_last_event": ["session.compaction_complete", "session.shutdown"],
+    "timestamp_paths": ["timestamp"],
+    "model_paths": ["data.model"],
+    "tool_name_paths": ["data.toolName"],
+    "arguments_paths": ["data.arguments"],
+    "success_paths": ["data.success"],
+    "output_token_paths": ["data.outputTokens"],
+    "turn_id_paths": ["data.turnId", "data.turn_id"],
+    "tool_call_id_paths": ["data.toolCallId", "data.tool_call_id"]
+  },
+  "token_events": [
+    {
+      "event_type": "session.compaction_complete",
+      "mode": "additive",
+      "input_components": ["data.compactionTokensUsed.inputTokens"],
+      "output_components": ["data.compactionTokensUsed.outputTokens"]
+    },
+    {
+      "event_type": "session.shutdown",
+      "mode": "cumulative_max",
+      "input_components": [
+        "data.tokenDetails.input.tokenCount",
+        "data.tokenDetails.cache_write.tokenCount"
+      ],
+      "output_components": ["data.tokenDetails.output.tokenCount"]
+    }
+  ],
+  "tool_identity_rules": [
+    {
+      "tool": "skill",
+      "category": "skills",
+      "target_paths": ["skill"],
+      "fallback": "skill"
+    },
+    {
+      "tool": "task",
+      "category": "delegates",
+      "target_paths": ["subagent_type", "agent_type", "name"],
+      "fallback": "task",
+      "safe_details": [
+        {
+          "label": "Agent type",
+          "paths": ["subagent_type", "agent_type"],
+          "fallback": ""
+        },
+        {
+          "label": "Agent name",
+          "paths": ["name"],
+          "fallback": ""
+        },
+        {
+          "label": "Mode",
+          "paths": ["mode"],
+          "fallback": ""
+        },
+        {
+          "label": "Model",
+          "paths": ["model"],
+          "fallback": ""
+        }
+      ]
+    }
+  ],
+  "mcp": {
+    "allowlist_path": [".copilot", "m-mcp-servers.json"],
+    "servers_path": "servers",
+    "tools_key": "tools"
+  },
+  "tool_category_rules": [
+    { "category": "mcp", "mcp_allowlist": true },
+    { "category": "mcp", "contains": ["mcp", "-"] },
+    { "category": "terminal", "contains": ["bash", "shell", "sql", "test"] },
+    { "category": "delegates", "contains": ["agent", "task"] },
+    { "category": "signal", "contains": ["web", "fetch", "docs", "github"] },
+    { "category": "forge", "contains": ["edit", "create", "apply_patch", "write"] },
+    { "category": "library", "contains": ["view", "read", "grep", "rg", "glob", "search"] },
+    { "category": "skills", "contains": ["skill", "memory"] },
+    { "category": "court", "contains": ["ask", "intent", "plan", "schedule"] }
+  ],
+  "fallback_category": "court"
+}

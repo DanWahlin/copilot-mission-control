@@ -71,6 +71,7 @@ The Playwright `webServer` config serves `dist/` over `python3 -m http.server 41
 - **Single scene.** Boot Phaser → instantiate `MissionControlScene` → resize listener calls `refreshDimensions()` + `scale.resize(W, H)` so the scene re-lays-out the dashboard on every window change.
 - **Push-driven updates.** The Rust watcher debounces FS events (~300 ms) and calls `win.eval("window.__cmcOnAgentActivityChanged && window.__cmcOnAgentActivityChanged()")`. The 30 s poll in the scene is a fallback for environments where the watcher fails to attach.
 - **Privacy invariant.** The `AgentProvider::scan()` boundary is the only place where Copilot session data is read. Only allowlisted fields cross into `AgentEventSummary` / `AgentSessionSummary` — never raw prompts, tool args, command output, file paths, or diffs.
+- **Provider schemas.** Copilot scanning is driven by the bundled schema in `src-tauri/provider-schemas/copilot.json`; the matching published copy lives in `docs/provider-schemas/copilot/` for GitHub Pages. Schema changes must keep both copies byte-identical, update the index checksum, and preserve strict allowlists for safe paths/details only.
 - **`window.__phaserGame`** is set so Playwright can reach into the scene registry without DOM scraping.
 - **LocalStorage keys** are prefixed `cmc_` (e.g., `cmc_muted`, `cmc_panels_hidden`, `cmc_prefs`).
 
