@@ -848,6 +848,61 @@ test.describe('Copilot Mission Control — Focus Mode', () => {
   });
 });
 
+test.describe('Copilot Mission Control — Schema Drift', () => {
+  test('schema drift dialog opens a privacy-safe issue report', async ({ page }) => {
+    const fixture = JSON.parse(JSON.stringify(MISSION_FIXTURE));
+    fixture.schema_drift = [
+      {
+        provider: 'copilot',
+        schema_version: '1.0.0',
+        severity: 'warning',
+        summary: 'Possible Copilot schema drift detected in 1 of 3 scanned sessions.',
+        checked_sessions: 3,
+        affected_sessions: 1,
+        total_events: 128,
+        recognized_events: 22,
+        tool_starts: 0,
+        tool_completes: 0,
+        missing_event_type: 0,
+        unknown_event_types: [
+          { name: 'assistant.new_shape', count: 42 },
+        ],
+        hints: [
+          'No tool starts were recognized in an active event window; check tool_start, tool_name_paths, and tool_call_id_paths.',
+        ],
+        raw_prompt: 'SECRET_PROMPT',
+        file_path: '/Users/dan/project/private.ts',
+      },
+    ];
+    await installFixture(page, fixture);
+    await page.addInitScript(() => {
+      (window as any).__openedUrls = [];
+      window.open = ((url: string | URL | undefined) => {
+        (window as any).__openedUrls.push(String(url || ''));
+        return null;
+      }) as typeof window.open;
+    });
+    await page.goto(GAME_URL);
+    await waitForGame(page);
+
+    await expect(page.locator('#schema-drift-overlay')).toHaveClass(/visible/);
+    await expect(page.locator('#schema-drift-body')).toContainText('No prompts, tool arguments, command output, file paths, or diffs');
+
+    await page.locator('#schema-drift-report').click();
+    const openedUrl = await page.waitForFunction(() => (window as any).__openedUrls?.[0] || '', null, { timeout: 2000 });
+    const url = String(await openedUrl.jsonValue());
+    expect(url).toContain('https://github.com/DanWahlin/copilot-mission-control/issues/new?');
+    const issueUrl = new URL(url);
+    const body = issueUrl.searchParams.get('body') || '';
+    expect(issueUrl.searchParams.get('title')).toBe('Schema drift detected: Copilot provider');
+    expect(issueUrl.searchParams.get('labels')).toBe('schema-drift,provider:copilot');
+    expect(body).toContain('assistant.new_shape');
+    expect(body).toContain('structural only');
+    expect(body).not.toContain('SECRET_PROMPT');
+    expect(body).not.toContain('/Users/dan');
+  });
+});
+
 test.describe('Copilot Mission Control — Ops Rules', () => {
   test('reports idle when no sessions are active', async ({ page }) => {
     const fixture = {

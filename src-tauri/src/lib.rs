@@ -114,6 +114,14 @@ async fn open_in_editor(path: String, scheme: Option<String>) -> Result<(), Stri
     tauri_plugin_opener::open_url(url, None::<&str>).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn open_external_url(url: String) -> Result<(), String> {
+    if !url.starts_with("https://github.com/DanWahlin/copilot-mission-control/issues/new?") {
+        return Err("Refusing unsupported external URL".to_string());
+    }
+    tauri_plugin_opener::open_url(url, None::<&str>).map_err(|e| e.to_string())
+}
+
 // ── Window helpers ────────────────────────────────────────────────────
 
 fn show_window(app: &AppHandle) {
@@ -199,7 +207,8 @@ pub fn run() {
             hide_app,
             get_agent_activity,
             get_copilot_activity,
-            open_in_editor
+            open_in_editor,
+            open_external_url
         ])
         .setup(|app| {
             // macOS dev mode: bare binary has no .app bundle, so set the

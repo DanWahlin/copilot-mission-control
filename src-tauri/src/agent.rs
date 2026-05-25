@@ -46,7 +46,32 @@ pub struct AgentActivity {
     pub tools: Vec<AgentToolMetric>,
     pub recent_events: Vec<AgentEventSummary>,
     pub alerts: Vec<String>,
+    #[serde(default)]
+    pub schema_drift: Vec<SchemaDriftReport>,
     pub generated_at_ms: u64,
+}
+
+#[derive(serde::Serialize, Default, Clone)]
+pub struct SchemaDriftReport {
+    pub provider: String,
+    pub schema_version: String,
+    pub severity: String,
+    pub summary: String,
+    pub checked_sessions: usize,
+    pub affected_sessions: usize,
+    pub total_events: usize,
+    pub recognized_events: usize,
+    pub tool_starts: usize,
+    pub tool_completes: usize,
+    pub missing_event_type: usize,
+    pub unknown_event_types: Vec<SchemaDriftCount>,
+    pub hints: Vec<String>,
+}
+
+#[derive(serde::Serialize, Default, Clone)]
+pub struct SchemaDriftCount {
+    pub name: String,
+    pub count: usize,
 }
 
 #[derive(serde::Serialize, Default, Clone)]
@@ -214,6 +239,7 @@ pub struct ProviderScan {
     pub tool_counts: BTreeMap<(String, String), usize>,
     pub recent_events: Vec<AgentEventSummary>,
     pub alerts: Vec<String>,
+    pub schema_drift: Vec<SchemaDriftReport>,
     pub total_events: usize,
     pub total_tool_calls: usize,
     pub total_output_tokens: u64,
@@ -232,6 +258,7 @@ impl ProviderScan {
             tool_counts: BTreeMap::new(),
             recent_events: Vec::new(),
             alerts: Vec::new(),
+            schema_drift: Vec::new(),
             total_events: 0,
             total_tool_calls: 0,
             total_output_tokens: 0,
@@ -903,6 +930,7 @@ fn merge_scans(scans: Vec<ProviderScan>) -> AgentActivity {
         activity.total_input_tokens += scan.total_input_tokens;
         activity.total_turns += scan.total_turns;
         activity.alerts.extend(scan.alerts);
+        activity.schema_drift.extend(scan.schema_drift);
         all_sessions.extend(scan.sessions);
         all_events.extend(scan.recent_events);
         for ((name, category), count) in scan.tool_counts {
@@ -1087,6 +1115,7 @@ fn scan_copilot() -> ProviderScan {
 
     // Load once per scan; reused for every tool execution event below.
     let mcp_allowlist = load_mcp_tool_allowlist(&schema);
+    let mut schema_drift = SchemaDriftAccumulator::new(provider, &schema.schema_version);
 
     let now = SystemTime::now();
 
@@ -1128,7 +1157,7 @@ fn scan_copilot() -> ProviderScan {
         summary.title = sanitize_session_title(workspace.get("summary"))
             .unwrap_or_else(|| format!("{} {}", summary.repository, summary.branch));
 
-        summarize_events(
+        let session_schema_stats = summarize_events(
             provider,
             &events_path,
             &session_id,
@@ -1138,6 +1167,7 @@ fn scan_copilot() -> ProviderScan {
             &mcp_allowlist,
             &schema,
         );
+        schema_drift.record_session(&summary, &session_schema_stats);
 
         // Active sessions report "working" or "thinking" by activity
         // level. We intentionally do NOT escalate to "needs-attention"
@@ -1165,8 +1195,170 @@ fn scan_copilot() -> ProviderScan {
         scan.total_turns += summary.turn_count;
         scan.sessions.push(summary);
     }
+    if let Some(report) = schema_drift.into_report() {
+        scan.alerts.push(report.summary.clone());
+        scan.schema_drift.push(report);
+    }
 
     scan
+}
+
+#[derive(Default)]
+struct SessionSchemaStats {
+    total_events: usize,
+    recognized_events: usize,
+    tool_starts: usize,
+    tool_completes: usize,
+    missing_event_type: usize,
+    unknown_event_types: BTreeMap<String, usize>,
+}
+
+impl SessionSchemaStats {
+    fn record_event_type(&mut self, event_type: &str, schema: &ProviderSchema) {
+        self.total_events += 1;
+        if event_type.is_empty() {
+            self.missing_event_type += 1;
+            return;
+        }
+        if is_schema_known_event(event_type, schema) {
+            self.recognized_events += 1;
+        } else {
+            *self
+                .unknown_event_types
+                .entry(event_type.to_string())
+                .or_insert(0) += 1;
+        }
+    }
+}
+
+struct SchemaDriftAccumulator {
+    provider: String,
+    schema_version: String,
+    checked_sessions: usize,
+    affected_sessions: usize,
+    total_events: usize,
+    recognized_events: usize,
+    tool_starts: usize,
+    tool_completes: usize,
+    missing_event_type: usize,
+    unknown_event_types: BTreeMap<String, usize>,
+    hints: BTreeSet<String>,
+}
+
+impl SchemaDriftAccumulator {
+    fn new(provider: &str, schema_version: &str) -> Self {
+        Self {
+            provider: provider.to_string(),
+            schema_version: schema_version.to_string(),
+            checked_sessions: 0,
+            affected_sessions: 0,
+            total_events: 0,
+            recognized_events: 0,
+            tool_starts: 0,
+            tool_completes: 0,
+            missing_event_type: 0,
+            unknown_event_types: BTreeMap::new(),
+            hints: BTreeSet::new(),
+        }
+    }
+
+    fn record_session(&mut self, summary: &AgentSessionSummary, stats: &SessionSchemaStats) {
+        if stats.total_events == 0 {
+            return;
+        }
+        self.checked_sessions += 1;
+        self.total_events += stats.total_events;
+        self.recognized_events += stats.recognized_events;
+        self.tool_starts += stats.tool_starts;
+        self.tool_completes += stats.tool_completes;
+        self.missing_event_type += stats.missing_event_type;
+        for (name, count) in &stats.unknown_event_types {
+            *self.unknown_event_types.entry(name.clone()).or_insert(0) += count;
+        }
+
+        let missing_event_type_ratio = stats.missing_event_type as f64 / stats.total_events as f64;
+        let unknown_ratio =
+            stats.unknown_event_types.values().sum::<usize>() as f64 / stats.total_events as f64;
+        let tool_counts_missing = summary.event_count >= 25 && summary.tool_count == 0;
+        let event_type_missing = stats.total_events >= 25 && missing_event_type_ratio >= 0.75;
+        let many_unknown_events = stats.total_events >= 25 && unknown_ratio >= 0.5;
+
+        if tool_counts_missing || event_type_missing || many_unknown_events {
+            self.affected_sessions += 1;
+        }
+        if tool_counts_missing {
+            self.hints.insert(
+                "No tool starts were recognized in an active event window; check tool_start, tool_name_paths, and tool_call_id_paths.".to_string(),
+            );
+        }
+        if event_type_missing {
+            self.hints.insert(
+                "Most event records did not match event_type_paths; check the configured event type JSON paths.".to_string(),
+            );
+        }
+        if many_unknown_events {
+            self.hints.insert(
+                "Many event type names are not represented in the schema; review new Copilot event names and ignore_as_last_event.".to_string(),
+            );
+        }
+        if stats.tool_starts > 0 && summary.token_checkpoints.is_empty() {
+            self.hints.insert(
+                "Tools were recognized but no token checkpoints were produced; check assistant_message output_token_paths and token_events.".to_string(),
+            );
+        }
+    }
+
+    fn into_report(self) -> Option<SchemaDriftReport> {
+        if self.affected_sessions == 0 {
+            return None;
+        }
+        let mut unknown_event_types = self
+            .unknown_event_types
+            .into_iter()
+            .map(|(name, count)| SchemaDriftCount { name, count })
+            .collect::<Vec<_>>();
+        unknown_event_types.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
+        unknown_event_types.truncate(12);
+        Some(SchemaDriftReport {
+            provider: self.provider,
+            schema_version: self.schema_version,
+            severity: "warning".to_string(),
+            summary: format!(
+                "Possible Copilot schema drift detected in {} of {} scanned session{}.",
+                self.affected_sessions,
+                self.checked_sessions,
+                if self.checked_sessions == 1 { "" } else { "s" }
+            ),
+            checked_sessions: self.checked_sessions,
+            affected_sessions: self.affected_sessions,
+            total_events: self.total_events,
+            recognized_events: self.recognized_events,
+            tool_starts: self.tool_starts,
+            tool_completes: self.tool_completes,
+            missing_event_type: self.missing_event_type,
+            unknown_event_types,
+            hints: self.hints.into_iter().collect(),
+        })
+    }
+}
+
+fn is_schema_known_event(event_type: &str, schema: &ProviderSchema) -> bool {
+    event_type == schema.events.tool_start
+        || event_type == schema.events.tool_complete
+        || event_type == schema.events.assistant_message
+        || event_type == schema.events.assistant_turn_start
+        || event_type == schema.events.assistant_turn_end
+        || event_type == schema.events.user_message
+        || event_type == schema.events.session_start
+        || schema
+            .events
+            .ignore_as_last_event
+            .iter()
+            .any(|ignored| ignored == event_type)
+        || schema
+            .token_events
+            .iter()
+            .any(|token| token.event_type == event_type)
 }
 
 // ── Copilot-specific helpers (kept private to this module) ────────────
@@ -1432,9 +1624,10 @@ fn summarize_events(
     recent_events: &mut Vec<AgentEventSummary>,
     mcp_allowlist: &HashSet<String>,
     schema: &ProviderSchema,
-) {
+) -> SessionSchemaStats {
+    let mut schema_stats = SessionSchemaStats::default();
     let Ok(mut file) = fs::File::open(path) else {
-        return;
+        return schema_stats;
     };
 
     // Tail-window limit. The full-event scan (recent tools, errors,
@@ -1482,6 +1675,7 @@ fn summarize_events(
         let event_type =
             string_from_paths(&value, &schema.events.event_type_paths).unwrap_or_default();
         let event_type = event_type.as_str();
+        schema_stats.record_event_type(event_type, schema);
         let timestamp =
             string_from_paths(&value, &schema.events.timestamp_paths).unwrap_or_default();
         if summary.token_checkpoints.is_empty()
@@ -1514,6 +1708,7 @@ fn summarize_events(
         }
 
         if event_type == schema.events.tool_start {
+            schema_stats.tool_starts += 1;
             let raw_tool_name = string_from_paths(&value, &schema.events.tool_name_paths)
                 .unwrap_or_else(|| "tool".to_string());
             let args = value_from_paths(&value, &schema.events.arguments_paths);
@@ -1613,6 +1808,7 @@ fn summarize_events(
                 },
             );
         } else if event_type == schema.events.tool_complete {
+            schema_stats.tool_completes += 1;
             let success = bool_from_paths(&value, &schema.events.success_paths).unwrap_or(true);
             let completion_category = if success { "complete" } else { "alert" };
             record_last_event(summary, &timestamp, event_type, completion_category);
@@ -1766,6 +1962,7 @@ fn summarize_events(
         .filter_map(|id| turns.get(id))
         .map(TurnBuilder::to_summary)
         .collect();
+    schema_stats
 }
 
 fn value_at_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
@@ -2449,6 +2646,7 @@ mod tests {
             tool_counts,
             recent_events: Vec::new(),
             alerts: Vec::new(),
+            schema_drift: Vec::new(),
             total_events: 0,
             total_tool_calls: 0,
             total_output_tokens: 0,

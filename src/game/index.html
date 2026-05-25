@@ -245,6 +245,18 @@
       box-sizing: border-box;
     }
     #inspector-overlay.visible { display: flex; }
+    #schema-drift-overlay {
+      position: fixed;
+      inset: 40px 0 0 0;
+      z-index: 35;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 28px;
+      background: rgba(0, 0, 0, 0.58);
+      box-sizing: border-box;
+    }
+    #schema-drift-overlay.visible { display: flex; }
     #inspector-dialog {
       width: min(1120px, calc(100vw - 56px));
       height: min(700px, calc(100vh - 96px));
@@ -261,6 +273,25 @@
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
     body.theme-light #inspector-dialog {
+      background: #ffffff;
+      color: #1f2937;
+      border-color: #cbd5e1;
+      box-shadow: 0 24px 70px rgba(15, 23, 42, 0.18);
+    }
+    #schema-drift-dialog {
+      width: min(760px, calc(100vw - 56px));
+      max-height: min(640px, calc(100vh - 96px));
+      overflow: auto;
+      background: #0c1430;
+      color: #e8ecff;
+      border: 2px solid #ffd54a;
+      border-radius: 16px;
+      box-shadow: 0 24px 70px rgba(0, 0, 0, 0.62);
+      padding: 20px;
+      box-sizing: border-box;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    body.theme-light #schema-drift-dialog {
       background: #ffffff;
       color: #1f2937;
       border-color: #cbd5e1;
@@ -754,6 +785,7 @@
       cursor: pointer;
     }
     .cmc-button.accent { color: #61d6ff; border-color: rgba(97, 214, 255, 0.7); }
+    .cmc-button.warn { color: #ffd54a; border-color: rgba(255, 213, 74, 0.75); }
     .cmc-button.disabled {
       opacity: 0.48;
       cursor: not-allowed;
@@ -767,6 +799,11 @@
       background: #eff6ff;
       color: #1d4ed8;
       border-color: #93c5fd;
+    }
+    body.theme-light .cmc-button.warn {
+      background: #fffbeb;
+      color: #92400e;
+      border-color: #f59e0b;
     }
     #dom-feed .cmc-panel-body {
       overflow-y: auto;
@@ -944,6 +981,23 @@
       <div class="inspector-body">
         <div id="inspector-list" class="inspector-list" tabindex="0"></div>
         <div id="inspector-detail" class="inspector-detail"></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="schema-drift-overlay" aria-hidden="true">
+    <div id="schema-drift-dialog" role="dialog" aria-modal="true" aria-labelledby="schema-drift-title" tabindex="-1">
+      <div class="inspector-header">
+        <div>
+          <h2 id="schema-drift-title" class="inspector-title">Possible Copilot schema drift</h2>
+          <div id="schema-drift-subtitle" class="inspector-subtitle"></div>
+        </div>
+        <button id="schema-drift-close" class="inspector-close" type="button" aria-label="Close schema drift dialog">×</button>
+      </div>
+      <div id="schema-drift-body" class="cmc-label" style="margin:14px 0"></div>
+      <div class="cmc-actions">
+        <button id="schema-drift-report" class="cmc-button warn" type="button">Report schema drift</button>
+        <button id="schema-drift-dismiss" class="cmc-button" type="button">Dismiss</button>
       </div>
     </div>
   </section>

@@ -115,7 +115,24 @@ interface CopilotActivity {
   tools: CopilotToolMetric[];
   recent_events: CopilotEventSummary[];
   alerts: string[];
+  schema_drift?: SchemaDriftReport[];
   generated_at_ms: number;
+}
+
+interface SchemaDriftReport {
+  provider: string;
+  schema_version: string;
+  severity: string;
+  summary: string;
+  checked_sessions: number;
+  affected_sessions: number;
+  total_events: number;
+  recognized_events: number;
+  tool_starts: number;
+  tool_completes: number;
+  missing_event_type: number;
+  unknown_event_types: Array<{ name: string; count: number }>;
+  hints: string[];
 }
 
 type WorkMixCounts = { read: number; write: number; command: number; web: number; task: number; mcp: number };
@@ -1417,6 +1434,7 @@ export class MissionControlScene extends Phaser.Scene {
           { label: 'MCP', value: work.mcp, category: 'mcp' },
         ],
       },
+      schemaDrift: this.activity.schema_drift ?? [],
       sessions: {
         header: activeOptions.length > 0 ? `Running sessions (${activeOptions.length})` : 'Recent sessions (none active)',
         rows: this.sessionPickerRows,

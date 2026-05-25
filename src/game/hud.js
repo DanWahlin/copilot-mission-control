@@ -526,8 +526,16 @@
   var domQuarter = $('dom-quarter');
   var domReplay = $('dom-replay');
   var domLoading = $('dashboard-loading');
+  var schemaDriftOverlay = $('schema-drift-overlay');
+  var schemaDriftSubtitle = $('schema-drift-subtitle');
+  var schemaDriftBody = $('schema-drift-body');
+  var schemaDriftClose = $('schema-drift-close');
+  var schemaDriftDismiss = $('schema-drift-dismiss');
+  var schemaDriftReport = $('schema-drift-report');
   var lastDashboard = null;
   var workMixScope = 'selected';
+  var activeSchemaDriftReport = null;
+  var lastSchemaDriftFingerprint = '';
 
   var CATEGORY_COLORS = {
     forge: '#f0911d',
@@ -841,6 +849,119 @@
     if (status) status.textContent = replay.status;
   }
 
+  function schemaDriftFingerprint(report) {
+    if (!report) return '';
+    return [
+      report.provider || 'provider',
+      report.schema_version || 'schema',
+      report.affected_sessions || 0,
+      report.total_events || 0,
+      report.recognized_events || 0,
+      report.missing_event_type || 0,
+      (report.unknown_event_types || []).map(function (row) {
+        return (row.name || 'unknown') + ':' + (row.count || 0);
+      }).join('|'),
+    ].join('::');
+  }
+
+  function schemaDriftIssueBody(report) {
+    var unknown = (report.unknown_event_types || []).slice(0, 10);
+    var hints = report.hints || [];
+    return [
+      '## Schema drift report',
+      '',
+      'Copilot Mission Control detected local Copilot CLI events that do not match the current parser/schema assumptions.',
+      '',
+      'This report is structural only. It does not include prompts, tool arguments, command output, file paths, or diffs.',
+      '',
+      '### Summary',
+      '',
+      '- Provider: ' + (report.provider || 'copilot'),
+      '- Schema version: ' + (report.schema_version || 'unknown'),
+      '- Severity: ' + (report.severity || 'warning'),
+      '- Checked sessions: ' + exactNumber(report.checked_sessions || 0),
+      '- Affected sessions: ' + exactNumber(report.affected_sessions || 0),
+      '- Total events sampled: ' + exactNumber(report.total_events || 0),
+      '- Recognized events: ' + exactNumber(report.recognized_events || 0),
+      '- Tool starts recognized: ' + exactNumber(report.tool_starts || 0),
+      '- Tool completes recognized: ' + exactNumber(report.tool_completes || 0),
+      '- Missing event type paths: ' + exactNumber(report.missing_event_type || 0),
+      '',
+      '### Unknown event types',
+      '',
+      unknown.length
+        ? unknown.map(function (row) { return '- `' + (row.name || 'unknown') + '`: ' + exactNumber(row.count || 0); }).join('\n')
+        : '- None reported',
+      '',
+      '### Parser hints',
+      '',
+      hints.length
+        ? hints.map(function (hint) { return '- ' + hint; }).join('\n')
+        : '- No specific hints reported',
+    ].join('\n');
+  }
+
+  function schemaDriftIssueUrl(report) {
+    var title = 'Schema drift detected: Copilot provider';
+    var body = schemaDriftIssueBody(report);
+    return 'https://github.com/DanWahlin/copilot-mission-control/issues/new?'
+      + 'title=' + encodeURIComponent(title)
+      + '&labels=' + encodeURIComponent('schema-drift,provider:copilot')
+      + '&body=' + encodeURIComponent(body);
+  }
+
+  function openExternalUrl(url) {
+    var tauriInvoke = window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke;
+    if (typeof tauriInvoke === 'function') {
+      return tauriInvoke('open_external_url', { url: url });
+    }
+    window.open(url, '_blank', 'noopener,noreferrer');
+    return Promise.resolve();
+  }
+
+  function closeSchemaDriftDialog() {
+    if (!schemaDriftOverlay) return;
+    schemaDriftOverlay.classList.remove('visible');
+    schemaDriftOverlay.setAttribute('aria-hidden', 'true');
+  }
+
+  function renderSchemaDriftDialog(report) {
+    if (!schemaDriftOverlay || !schemaDriftSubtitle || !schemaDriftBody || !report) return;
+    activeSchemaDriftReport = report;
+    schemaDriftSubtitle.textContent = (report.summary || 'The Copilot provider saw unexpected event shapes.')
+      + ' Review and report a privacy-safe issue if this looks wrong.';
+    var unknown = (report.unknown_event_types || []).slice(0, 5).map(function (row) {
+      return '<li><code>' + escapeHtml(row.name || 'unknown') + '</code>: ' + escapeHtml(exactNumber(row.count || 0)) + '</li>';
+    }).join('');
+    schemaDriftBody.innerHTML = '<p>The app can open a prefilled GitHub issue with structural parser details only.</p>'
+      + '<dl class="inspector-stats">'
+      + '<dt>Affected</dt><dd>' + escapeHtml(exactNumber(report.affected_sessions || 0)) + ' of ' + escapeHtml(exactNumber(report.checked_sessions || 0)) + ' sessions</dd>'
+      + '<dt>Events</dt><dd>' + escapeHtml(exactNumber(report.recognized_events || 0)) + ' recognized / ' + escapeHtml(exactNumber(report.total_events || 0)) + ' sampled</dd>'
+      + '<dt>Tools</dt><dd>' + escapeHtml(exactNumber(report.tool_starts || 0)) + ' starts / ' + escapeHtml(exactNumber(report.tool_completes || 0)) + ' completes</dd>'
+      + '</dl>'
+      + (unknown ? '<p>Unknown event types:</p><ul>' + unknown + '</ul>' : '<p>No unknown event type names were reported.</p>')
+      + '<p class="cmc-muted">No prompts, tool arguments, command output, file paths, or diffs are included.</p>';
+    schemaDriftOverlay.classList.add('visible');
+    schemaDriftOverlay.setAttribute('aria-hidden', 'false');
+    var dialog = $('schema-drift-dialog');
+    if (dialog && dialog.focus) dialog.focus();
+  }
+
+  function maybeShowSchemaDrift(view) {
+    var report = view && view.schemaDrift && view.schemaDrift[0];
+    if (!report) return;
+    var fingerprint = schemaDriftFingerprint(report);
+    var dismissed = '';
+    try {
+      dismissed = window.localStorage && window.localStorage.getItem('cmc_schema_drift_dismissed');
+    } catch (_err) {
+      dismissed = '';
+    }
+    if (!fingerprint || fingerprint === lastSchemaDriftFingerprint || fingerprint === dismissed) return;
+    lastSchemaDriftFingerprint = fingerprint;
+    renderSchemaDriftDialog(report);
+  }
+
   window.__cmcRenderDashboard = function (view) {
     lastDashboard = view;
     document.body.classList.add('dashboard-ready');
@@ -876,6 +997,7 @@
     renderFeed(view);
     renderQuarter(view);
     renderReplay(view);
+    maybeShowSchemaDrift(view);
   };
 
   window.__cmcRenderQuarter = function (quarter) {
@@ -905,7 +1027,36 @@
     }
   });
 
+  [schemaDriftClose, schemaDriftDismiss].forEach(function (button) {
+    if (!button) return;
+    button.addEventListener('click', function () {
+      if (activeSchemaDriftReport) {
+        try {
+          window.localStorage && window.localStorage.setItem('cmc_schema_drift_dismissed', schemaDriftFingerprint(activeSchemaDriftReport));
+        } catch (_err) {
+          // Ignore storage failures; the dialog can appear again on refresh.
+        }
+      }
+      closeSchemaDriftDialog();
+    });
+  });
+
+  if (schemaDriftReport) {
+    schemaDriftReport.addEventListener('click', function () {
+      if (!activeSchemaDriftReport) return;
+      openExternalUrl(schemaDriftIssueUrl(activeSchemaDriftReport)).then(function () {
+        closeSchemaDriftDialog();
+      }).catch(function (err) {
+        console.error('Unable to open schema drift issue URL', err);
+      });
+    });
+  }
+
   document.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape' && schemaDriftOverlay && schemaDriftOverlay.classList.contains('visible')) {
+      closeSchemaDriftDialog();
+      return;
+    }
     var target = event.target;
     if (!target || !target.matches || !target.matches('[data-cmc-action="replay-seek"]')) return;
     if (typeof window.__cmcSeekReplayRatio !== 'function') return;
