@@ -68,6 +68,11 @@ interface SessionTokenCheckpoint {
   output_tokens: number;
 }
 
+interface ActivityTokenBaseline {
+  input_tokens: number;
+  output_tokens: number;
+}
+
 interface SessionToolCall {
   tool: string;
   category: string;
@@ -191,10 +196,10 @@ interface EventPulse {
 }
 
 /// Short-lived expanding ring drawn at a building when a pulse arrives
-/// — the "rune lights up" sigil. Lives in the same `flow` Graphics
-/// layer as the pulses and is rendered with `ADD` blend so overlapping
-/// arrivals (chatty session) brighten naturally instead of stacking
-/// flat. Auto-removed once `age >= lifetime`.
+/// — the "rune lights up" sigil. Rendered with pooled/tinted Images
+/// instead of per-frame Graphics commands so overlapping arrivals can
+/// still brighten additively without rebuilding WebGL geometry.
+/// Auto-removed once `age >= lifetime`.
 interface ArrivalEffect {
   x: number;
   y: number;
@@ -221,7 +226,9 @@ declare global {
     __cmcUpdateModel?: (model: string) => void;
     __cmcSetPanelsHidden?: (hidden: boolean) => void;
     __cmcRenderDashboard?: (view: unknown) => void;
+    __cmcRenderLiveDashboard?: (view: unknown) => void;
     __cmcRenderQuarter?: (quarter: unknown) => void;
+    __cmcResetActivityStats?: () => void;
     __cmcSelectSession?: (id: string) => void;
     __cmcOpenSelectedSessionInEditor?: () => void;
     __cmcToggleReplayPause?: () => void;
@@ -278,11 +285,20 @@ const QUARTER_TEXTURES: Record<string, string> = {
   library: 'outpost_disc',
   terminal: 'console_wide_teal',
   signal: 'telescope_blue',
-  hooks: 'satellite_cross',
+  hooks: 'screen_radar_blue',
   delegates: 'ship_fighter_blue',
   skills: 'satellite_dish_stand',
   court: 'console_sphere',
   mcp: 'satellite_8panel',
+};
+
+const QUARTER_SPRITE_Y_OFFSETS: Partial<Record<MissionCategory, number>> = {
+  forge: -8,
+  library: -8,
+};
+
+const QUARTER_SPRITE_SCALE: Partial<Record<MissionCategory, number>> = {
+  hooks: 0.82,
 };
 
 const MISSION_SECTOR_COUNT = 9;
@@ -339,8 +355,8 @@ const PULSE_STAGGER_MS = 120;
 /// `PULSE_TRAIL_SPACING_PROGRESS`, so the visible trail length is
 /// `samples * spacing` of the total journey. 4 × 0.055 ≈ 22% of the
 /// path — short enough to read as a tail, long enough to feel
-/// mystical. Tuned down from 6 for fps — every extra sample is a fill
-/// call per pulse per frame.
+/// mystical. Tuned down from 6 for fps — every extra sample is another
+/// pooled Image quad per pulse per frame.
 const PULSE_TRAIL_SAMPLES = 4;
 const PULSE_TRAIL_SPACING_PROGRESS = 0.055;
 
@@ -350,6 +366,17 @@ const PULSE_TRAIL_SPACING_PROGRESS = 0.055;
 /// the same at every viewport size.
 const ARRIVAL_LIFETIME_MS = 520;
 const ARRIVAL_MAX_RADIUS_PX = 44;
+const LIVE_DASHBOARD_PUBLISH_INTERVAL_MS = 250;
+const PUSH_REFRESH_MIN_INTERVAL_MS = 500;
+const ACTIVE_ANIMATION_REFRESH_DELAY_MS = 250;
+const LIVE_RENDER_QUIET_MS = 1200;
+const PULSE_TEXTURE_KEY = 'cmc-pulse-quad';
+const ARRIVAL_FILL_TEXTURE_KEY = 'cmc-arrival-fill';
+const ARRIVAL_RING_TEXTURE_KEY = 'cmc-arrival-ring';
+const PULSE_TEXTURE_SIZE = 16;
+const ARRIVAL_TEXTURE_SIZE = 96;
+const INITIAL_PULSE_VISUAL_POOL_SIZE = 96;
+const INITIAL_ARRIVAL_VISUAL_POOL_SIZE = 48;
 
 export class MissionControlScene extends Phaser.Scene {
   /// Full-window dark fill that sits behind the mission map. Drawn
@@ -358,13 +385,18 @@ export class MissionControlScene extends Phaser.Scene {
   /// auto-respond to scale.resize, so we keep a handle to redraw).
   private backdrop: any = null;
   private map!: any;
-  private moat!: any;
-  private flow!: any;
-  /// Cached castle geometry so update() can re-draw the animated moat
-  /// pulse every frame without recomputing layout. Populated by
+  private moatPulseRings: any[] = [];
+  private pulseVisualPool: any[] = [];
+  private arrivalFillVisualPool: any[] = [];
+  private arrivalRingVisualPool: any[] = [];
+  private activePulseVisualCount = 0;
+  private activeArrivalVisualCount = 0;
+  /// Cached castle geometry so update() can move the animated moat
+  /// pulse Images every frame without recomputing layout. Populated by
   /// drawCastle() each renderActivity() pass; null until first draw.
   private moatGeometry: { x: number; y: number; radius: number; active: boolean } | null = null;
   private textObjects: any[] = [];
+  private quarterCountTextObjects = new Map<string, any>();
   /// Focus mode: when true, the Summary + Selected Session + Activity
   /// Feed side panels are skipped and computeLayout() collapses their
   /// widths to 0 so the mission ring (castle + quarters) expands to
@@ -442,9 +474,20 @@ export class MissionControlScene extends Phaser.Scene {
   /// one rebuild can cost 30-100ms. If that spike lands while comet
   /// pulses are flying it drops 3-6 frames and the user sees stutter.
   /// `requestRender()` flips this flag during pulse activity instead
-  /// of rebuilding immediately; the per-frame `update()` loop then
-  /// flushes a single render once pulses settle.
+  /// of rebuilding immediately. The per-frame `update()` loop then
+  /// flushes once pulses settle. During sustained bursts, the DOM
+  /// dashboard gets lightweight updates while Phaser text/sprites stay
+  /// untouched so pulse animation keeps a stable frame budget.
   private renderPending = false;
+  private lastFullRenderAt = 0;
+  private lastLiveDashboardPublishAt = 0;
+  private pushRefreshEvent: any = null;
+  private pendingPushRefresh = false;
+  private lastPushRefreshAt = 0;
+  private liveRenderQuietUntil = 0;
+  private rawActivity: CopilotActivity = createEmptyActivity();
+  private activityResetAtMs: number | null = null;
+  private activityResetTokenBaselines: Record<string, ActivityTokenBaseline> = {};
   public replayState = {
     paused: false,
     cursor: 0,
@@ -484,22 +527,21 @@ export class MissionControlScene extends Phaser.Scene {
     this.events.once('shutdown', () => this.shutdown());
 
     this.map = this.add.graphics().setDepth(1);
-    // Animated moat ring that pulses when sessions are active. Lives
-    // on its own graphics layer so update() can repaint it 60fps
-    // without rebuilding the whole scene. Depth 2 keeps it above the
-    // map background but below quarter sprites (depth 5+).
-    this.moat = this.add.graphics().setDepth(2);
-    // ADD blend on the flow layer is set ONCE here (not toggled per
-    // frame in updateEventPulses) because nothing else draws to this
-    // layer — every pulse trail sample, head, and arrival sigil
-    // should blend additively for the mystical glow.
-    this.flow = this.add.graphics().setDepth(8).setBlendMode(Phaser.BlendModes.ADD);
+    this.textures.get(SPACE_ATLAS_KEY)?.setFilter?.(Phaser.Textures.FilterMode.LINEAR);
+    this.ensurePulseTextures();
+    this.createPulseVisualPools();
+    this.moatPulseRings = [
+      this.createPooledImage(ARRIVAL_RING_TEXTURE_KEY).setDepth(2),
+      this.createPooledImage(ARRIVAL_RING_TEXTURE_KEY).setDepth(2),
+    ];
 
     // Restore last-session prefs so context survives a window restart.
     // The migration in loadMissionPrefs() folds older `pinnedDistrictKey`
     // and `inspectedDistrictKey` storage entries into the new key.
     const prefs = loadMissionPrefs();
     this.inspectedQuarterKey = prefs.inspectedQuarterKey ?? null;
+    this.activityResetAtMs = validResetAtMs(prefs.activityResetAtMs);
+    this.activityResetTokenBaselines = prefs.activityResetTokenBaselines ?? {};
     if (prefs.replayPaused) this.replayPaused = true;
     if (typeof prefs.lastSelectedSessionId === 'string') {
       // Mark as user-selected so pickSelectedSession respects the
@@ -509,7 +551,7 @@ export class MissionControlScene extends Phaser.Scene {
       // Actual index resolution happens after activity loads.
     }
 
-    this.activity = this.resolveFixture();
+    this.setActivity(this.resolveFixture());
     this.ingestActivityEvents(this.activity.recent_events);
     if (prefs.lastSelectedSessionId) {
       const idx = this.activity.sessions.findIndex(s => s.id === prefs.lastSelectedSessionId);
@@ -534,7 +576,7 @@ export class MissionControlScene extends Phaser.Scene {
     // check: only refresh if this scene is still the active one.
     window.__cmcOnAgentActivityChanged = () => {
       if (!this.scene?.isActive?.()) return;
-      void this.refreshActivity(true);
+      this.schedulePushRefresh();
     };
     window.__cmcSetTheme = (mode: ThemeMode) => {
       if (!this.scene?.isActive?.()) return;
@@ -561,6 +603,10 @@ export class MissionControlScene extends Phaser.Scene {
     window.__cmcSelectSession = (id: string) => {
       if (!this.scene?.isActive?.()) return;
       this.selectSessionById(id);
+    };
+    window.__cmcResetActivityStats = () => {
+      if (!this.scene?.isActive?.()) return;
+      this.resetActivityStats();
     };
     window.__cmcOpenSelectedSessionInEditor = () => {
       if (!this.scene?.isActive?.()) return;
@@ -613,36 +659,83 @@ export class MissionControlScene extends Phaser.Scene {
     this.flushPendingRender();
   }
 
-  /// Coalesces background-driven renders. If pulses are queued or
-  /// flying we flip a flag and let the per-frame `flushPendingRender()`
-  /// pick it up the moment things settle; if the scene is otherwise
-  /// idle we render immediately so the user never sees a stale
-  /// dashboard. We check `eventPulses.length` (not the per-frame
-  /// `activeEventPulseCount`) because `requestRender` typically fires
-  /// straight after `ingestActivityEvents` queues new pulses — those
-  /// haven't been counted by `updateEventPulses` yet.
-  private requestRender() {
-    if (this.eventPulses.length > 0) {
+  private refreshActivityViewState(recomputeLayout = false) {
+    if (recomputeLayout || !this.layout) {
+      this.layout = this.computeLayout();
+    }
+    this.selectedSession = this.pickSelectedSession();
+    this.quarters = this.buildQuarters();
+    this.hoveredQuarterKey = this.hoveredQuarterIndex >= 0
+      ? this.quarters[this.hoveredQuarterIndex]?.key ?? null
+      : null;
+    this.opsSummary = buildOpsSummary(this.activity);
+    this.pushSelectedModelToNavbar();
+  }
+
+  /// Coalesces background-driven map renders. If pulses are queued or
+  /// flying we update cheap derived state + live DOM panels on a small
+  /// throttle, then let `flushPendingRender()` rebuild the heavier Phaser
+  /// text/sprite layer only after the animation layers are idle.
+  /// We check queued pulses and arrival sigils directly because
+  /// `requestRender` can fire before the per-frame counters update, and
+  /// late watcher pushes can arrive while only the landing bloom remains.
+  private hasActiveMotion() {
+    return this.eventPulses.length > 0 || this.arrivalEffects.length > 0;
+  }
+
+  private requestRender(mode: 'normal' | 'live' = 'normal') {
+    const now = performance.now();
+    const deferFullRender = mode === 'live' || this.hasActiveMotion();
+    if (deferFullRender) {
       this.renderPending = true;
+      this.refreshActivityViewState();
+      this.updateQuarterCountLabels();
+      if (now - this.lastLiveDashboardPublishAt >= LIVE_DASHBOARD_PUBLISH_INTERVAL_MS) {
+        this.publishLiveDashboardView();
+        this.lastLiveDashboardPublishAt = now;
+      }
+      if (mode === 'live') {
+        this.liveRenderQuietUntil = Math.max(this.liveRenderQuietUntil, now + LIVE_RENDER_QUIET_MS);
+      }
       return;
     }
     this.renderPending = false;
+    this.liveRenderQuietUntil = 0;
     this.renderActivity();
+  }
+
+  private schedulePushRefresh() {
+    if (this.pendingPushRefresh) return;
+    this.pendingPushRefresh = true;
+    const elapsed = performance.now() - this.lastPushRefreshAt;
+    const delay = Math.max(0, PUSH_REFRESH_MIN_INTERVAL_MS - elapsed);
+    const run = () => {
+      this.pushRefreshEvent = null;
+      if (this.loading || this.hasActiveMotion()) {
+        this.pushRefreshEvent = this.time.delayedCall(ACTIVE_ANIMATION_REFRESH_DELAY_MS, run);
+        return;
+      }
+      this.pendingPushRefresh = false;
+      this.lastPushRefreshAt = performance.now();
+      void this.refreshActivity(true);
+    };
+    this.pushRefreshEvent = this.time.delayedCall(delay, run);
   }
 
   private flushPendingRender() {
     if (!this.renderPending) return;
-    if (this.eventPulses.length > 0) return;
+    if (this.hasActiveMotion()) return;
+    if (performance.now() < this.liveRenderQuietUntil) return;
     this.renderPending = false;
+    this.liveRenderQuietUntil = 0;
     this.renderActivity();
   }
 
-  /// Animated overlay on top of the static moat ring. Only paints when
-  /// the cached geometry says sessions are active; otherwise the moat
-  /// layer stays empty so the base blue water reads as "calm".
+  /// Animated overlay on top of the static moat ring. Only shows when
+  /// the cached geometry says sessions are active; otherwise the ring
+  /// Images stay hidden so the base blue water reads as "calm".
   private updateMoatPulse() {
-    if (!this.moat) return;
-    this.moat.clear();
+    for (const ring of this.moatPulseRings) ring.setVisible(false).setActive(false);
     const g = this.moatGeometry;
     if (!g || !g.active) return;
     // Two phase-offset rings, each a slow sine, so the pulse looks
@@ -651,15 +744,16 @@ export class MissionControlScene extends Phaser.Scene {
     // renderActivity() rebuilds.
     const t = performance.now() / 1000;
     const baseR = g.radius;
-    const ring = (offset: number, baseAlpha: number) => {
+    const ring = (index: number, offset: number, baseAlpha: number) => {
+      const visual = this.moatPulseRings[index];
+      if (!visual) return;
       const phase = (Math.sin(t * 1.6 + offset) + 1) / 2;
       const alpha = baseAlpha * (0.4 + phase * 0.6);
       const radius = baseR + phase * 6;
-      this.moat.lineStyle(Math.max(2, 3 + phase * 2), 0x60ff9a, alpha);
-      this.moat.strokeCircle(g.x, g.y, radius);
+      this.showPooledImage(visual, g.x, g.y, radius * 2, 0x60ff9a, alpha);
     };
-    ring(0, 0.55);
-    ring(Math.PI, 0.32);
+    ring(0, 0, 0.55);
+    ring(1, Math.PI, 0.32);
   }
 
   private updateCursorStyle() {
@@ -674,6 +768,10 @@ export class MissionControlScene extends Phaser.Scene {
     if (this.pollEvent) {
       this.pollEvent.remove(false);
       this.pollEvent = undefined;
+    }
+    if (this.pushRefreshEvent) {
+      this.pushRefreshEvent.remove(false);
+      this.pushRefreshEvent = null;
     }
     for (const evt of this.startupRetryEvents) {
       evt?.remove?.(false);
@@ -695,6 +793,8 @@ export class MissionControlScene extends Phaser.Scene {
     }
     window.__cmcSelectSession = undefined;
     window.__cmcOpenSelectedSessionInEditor = undefined;
+    window.__cmcRenderLiveDashboard = undefined;
+    window.__cmcResetActivityStats = undefined;
     window.__cmcToggleReplayPause = undefined;
     window.__cmcJumpReplayToLive = undefined;
     window.__cmcSeekReplayRatio = undefined;
@@ -702,13 +802,16 @@ export class MissionControlScene extends Phaser.Scene {
     // when the scene tears down (game switch, hot reload, etc.).
     try { window.__cmcUpdateModel?.(''); } catch { /* no-op */ }
     this.clearDynamicObjects();
-    this.flow?.clear();
-    this.moat?.clear();
+    this.destroyPulseVisualPools();
+    for (const ring of this.moatPulseRings) ring.destroy();
+    this.moatPulseRings = [];
     this.moatGeometry = null;
     this.eventPulses = [];
     this.arrivalEffects = [];
     this.activeEventPulseCount = 0;
     this.renderPending = false;
+    this.pendingPushRefresh = false;
+    this.lastPushRefreshAt = 0;
     this.eventLog = [];
     this.seenEventKeys.clear();
     this.replayCursor = 0;
@@ -736,6 +839,219 @@ export class MissionControlScene extends Phaser.Scene {
     this.backdrop.setScrollFactor(0);
   }
 
+  private ensurePulseTextures() {
+    if (!this.textures.exists(PULSE_TEXTURE_KEY)) {
+      const g = this.add.graphics();
+      g.fillStyle(0xffffff, 1);
+      g.fillRect(0, 0, PULSE_TEXTURE_SIZE, PULSE_TEXTURE_SIZE);
+      g.generateTexture(PULSE_TEXTURE_KEY, PULSE_TEXTURE_SIZE, PULSE_TEXTURE_SIZE);
+      g.destroy();
+    }
+    if (!this.textures.exists(ARRIVAL_FILL_TEXTURE_KEY)) {
+      const g = this.add.graphics();
+      const c = ARRIVAL_TEXTURE_SIZE / 2;
+      g.fillStyle(0xffffff, 1);
+      g.fillCircle(c, c, c - 4);
+      g.generateTexture(ARRIVAL_FILL_TEXTURE_KEY, ARRIVAL_TEXTURE_SIZE, ARRIVAL_TEXTURE_SIZE);
+      g.destroy();
+    }
+    if (!this.textures.exists(ARRIVAL_RING_TEXTURE_KEY)) {
+      const g = this.add.graphics();
+      const c = ARRIVAL_TEXTURE_SIZE / 2;
+      g.lineStyle(6, 0xffffff, 1);
+      g.strokeCircle(c, c, c - 8);
+      g.generateTexture(ARRIVAL_RING_TEXTURE_KEY, ARRIVAL_TEXTURE_SIZE, ARRIVAL_TEXTURE_SIZE);
+      g.destroy();
+    }
+  }
+
+  private createPulseVisualPools() {
+    this.pulseVisualPool = this.createImagePool(PULSE_TEXTURE_KEY, INITIAL_PULSE_VISUAL_POOL_SIZE);
+    this.arrivalFillVisualPool = this.createImagePool(ARRIVAL_FILL_TEXTURE_KEY, INITIAL_ARRIVAL_VISUAL_POOL_SIZE);
+    this.arrivalRingVisualPool = this.createImagePool(ARRIVAL_RING_TEXTURE_KEY, INITIAL_ARRIVAL_VISUAL_POOL_SIZE);
+  }
+
+  private createImagePool(textureKey: string, size: number) {
+    return Array.from({ length: size }, () => this.createPooledImage(textureKey));
+  }
+
+  private createPooledImage(textureKey: string) {
+    return this.add.image(0, 0, textureKey)
+      .setOrigin(0.5)
+      .setDepth(8)
+      .setBlendMode(Phaser.BlendModes.ADD)
+      .setActive(false)
+      .setVisible(false);
+  }
+
+  private destroyPulseVisualPools() {
+    for (const img of this.pulseVisualPool) img.destroy();
+    for (const img of this.arrivalFillVisualPool) img.destroy();
+    for (const img of this.arrivalRingVisualPool) img.destroy();
+    this.pulseVisualPool = [];
+    this.arrivalFillVisualPool = [];
+    this.arrivalRingVisualPool = [];
+    this.activePulseVisualCount = 0;
+    this.activeArrivalVisualCount = 0;
+  }
+
+  private hidePulseVisuals() {
+    for (let i = 0; i < this.activePulseVisualCount; i++) {
+      const img = this.pulseVisualPool[i];
+      img.setActive(false).setVisible(false);
+    }
+    for (let i = 0; i < this.activeArrivalVisualCount; i++) {
+      const fill = this.arrivalFillVisualPool[i];
+      const ring = this.arrivalRingVisualPool[i];
+      fill.setActive(false).setVisible(false);
+      ring.setActive(false).setVisible(false);
+    }
+    this.activePulseVisualCount = 0;
+    this.activeArrivalVisualCount = 0;
+  }
+
+  private nextPulseVisual() {
+    if (this.activePulseVisualCount >= this.pulseVisualPool.length) {
+      this.pulseVisualPool.push(this.createPooledImage(PULSE_TEXTURE_KEY));
+    }
+    return this.pulseVisualPool[this.activePulseVisualCount++];
+  }
+
+  private nextArrivalVisualPair() {
+    if (this.activeArrivalVisualCount >= this.arrivalFillVisualPool.length) {
+      this.arrivalFillVisualPool.push(this.createPooledImage(ARRIVAL_FILL_TEXTURE_KEY));
+      this.arrivalRingVisualPool.push(this.createPooledImage(ARRIVAL_RING_TEXTURE_KEY));
+    }
+    const index = this.activeArrivalVisualCount++;
+    return {
+      fill: this.arrivalFillVisualPool[index],
+      ring: this.arrivalRingVisualPool[index],
+    };
+  }
+
+  private showPooledImage(img: any, x: number, y: number, size: number, color: number, alpha: number) {
+    const frame = img.frame;
+    const nativeSize = Math.max(
+      1,
+      frame?.realWidth ?? frame?.width ?? img.width ?? PULSE_TEXTURE_SIZE,
+      frame?.realHeight ?? frame?.height ?? img.height ?? PULSE_TEXTURE_SIZE,
+    );
+    img
+      .setPosition(snap(x), snap(y))
+      .setScale(size / nativeSize)
+      .setTint(color)
+      .setAlpha(alpha)
+      .setActive(true)
+      .setVisible(true);
+  }
+
+  private setActivity(activity: CopilotActivity) {
+    this.rawActivity = normalizeActivity(activity);
+    this.activity = this.applyActivityResetBaseline(this.rawActivity);
+  }
+
+  private applyActivityResetBaseline(activity: CopilotActivity): CopilotActivity {
+    const normalized = normalizeActivity(activity);
+    const resetAt = this.activityResetAtMs;
+    if (!resetAt) return normalized;
+
+    const recentEvents = normalized.recent_events.filter((event) => this.isAfterReset(event.timestamp));
+    const sessions = normalized.sessions.map((session) => this.applySessionResetBaseline(session));
+    const recentToolCalls = sessions.flatMap((session) => session.recent_tool_calls ?? []);
+    const tools = summarizeToolCalls(recentToolCalls);
+    const totalInputTokens = sessions.reduce((sum, session) => sum + (session.input_tokens ?? 0), 0);
+    const totalOutputTokens = sessions.reduce((sum, session) => sum + session.output_tokens, 0);
+    const totalTurns = sessions.reduce((sum, session) => sum + (session.turn_count ?? 0), 0);
+
+    return {
+      ...normalized,
+      sessions,
+      tools,
+      recent_events: recentEvents,
+      total_events: recentEvents.length,
+      total_tool_calls: recentToolCalls.length,
+      total_input_tokens: totalInputTokens,
+      total_output_tokens: totalOutputTokens,
+      total_turns: totalTurns,
+    };
+  }
+
+  private applySessionResetBaseline(session: CopilotSessionSummary): CopilotSessionSummary {
+    const baseline = this.activityResetTokenBaselines[session.id] ?? { input_tokens: 0, output_tokens: 0 };
+    const recentToolCalls = (session.recent_tool_calls ?? []).filter((call) => this.isAfterReset(call.timestamp));
+    const recentTurns = (session.recent_turns ?? []).filter((turn) =>
+      this.isAfterReset(turn.started_at) || this.isAfterReset(turn.ended_at)
+    );
+    const tokenCheckpoints = (session.token_checkpoints ?? [])
+      .filter((checkpoint) => this.isAfterReset(checkpoint.timestamp))
+      .map((checkpoint) => ({
+        ...checkpoint,
+        input_tokens: Math.max(0, checkpoint.input_tokens - baseline.input_tokens),
+        output_tokens: Math.max(0, checkpoint.output_tokens - baseline.output_tokens),
+      }));
+    const categoryCounts = categoryCountsFromToolCalls(recentToolCalls);
+
+    return {
+      ...session,
+      event_count: recentToolCalls.length,
+      tool_count: recentToolCalls.length,
+      write_count: categoryCounts.forge,
+      read_count: categoryCounts.library,
+      command_count: categoryCounts.terminal,
+      web_count: categoryCounts.signal,
+      task_count: categoryCounts.delegates,
+      delegates_count: categoryCounts.delegates,
+      skills_count: categoryCounts.skills,
+      court_count: categoryCounts.court,
+      mcp_count: categoryCounts.mcp,
+      hooks_count: categoryCounts.hooks,
+      error_count: recentToolCalls.filter((call) => call.success === false).length,
+      turn_count: recentTurns.length,
+      input_tokens: Math.max(0, (session.input_tokens ?? 0) - baseline.input_tokens),
+      output_tokens: Math.max(0, session.output_tokens - baseline.output_tokens),
+      recent_tool_calls: recentToolCalls,
+      recent_turns: recentTurns,
+      token_checkpoints: tokenCheckpoints,
+    };
+  }
+
+  private isAfterReset(timestamp?: string | null): boolean {
+    if (!this.activityResetAtMs) return true;
+    if (!timestamp) return false;
+    const ms = Date.parse(timestamp);
+    return Number.isFinite(ms) && ms > this.activityResetAtMs;
+  }
+
+  private resetActivityStats() {
+    const resetAt = Date.now();
+    const baselines: Record<string, ActivityTokenBaseline> = {};
+    for (const session of this.rawActivity.sessions) {
+      baselines[session.id] = {
+        input_tokens: session.input_tokens ?? 0,
+        output_tokens: session.output_tokens,
+      };
+    }
+
+    this.activityResetAtMs = resetAt;
+    this.activityResetTokenBaselines = baselines;
+    savePref('activityResetAtMs', resetAt);
+    savePref('activityResetTokenBaselines', baselines);
+
+    this.eventLog = [];
+    this.seenEventKeys.clear();
+    this.workMixHistory = {};
+    this.eventPulses = [];
+    this.arrivalEffects = [];
+    this.hidePulseVisuals();
+    this.activeEventPulseCount = 0;
+    this.replayCursor = 0;
+    this.replayPaused = false;
+    this.replayPlayTimer = 0;
+    this.updateReplayState();
+    this.setActivity(this.rawActivity);
+    this.renderActivity();
+  }
+
   private async refreshActivity(force = false) {
     if (this.loading) return;
     // De-dupe rapid back-to-back calls (e.g. watcher push + poll tick at
@@ -747,22 +1063,22 @@ export class MissionControlScene extends Phaser.Scene {
     try {
       const fixture = this.resolveFixture(false);
       if (fixture.source !== 'browser-empty') {
-        this.activity = fixture;
+        this.setActivity(fixture);
       } else {
         const ti = (window as any).__TAURI_INTERNALS__;
         if (ti?.invoke) {
           try {
-            this.activity = await ti.invoke('get_agent_activity') as CopilotActivity;
+            this.setActivity(await ti.invoke('get_agent_activity') as CopilotActivity);
           } catch {
-            this.activity = createEmptyActivity();
+            this.setActivity(createEmptyActivity());
           }
         } else {
-          this.activity = createEmptyActivity();
+          this.setActivity(createEmptyActivity());
         }
       }
       this.lastRefresh = performance.now();
-      this.ingestActivityEvents(this.activity.recent_events);
-      this.requestRender();
+      const appended = this.ingestActivityEvents(this.activity.recent_events);
+      this.requestRender(force && this.bootstrapCompleted && appended > 0 ? 'live' : 'normal');
     } finally {
       this.loading = false;
     }
@@ -778,18 +1094,13 @@ export class MissionControlScene extends Phaser.Scene {
     this.clearDynamicObjects();
     this.map.clear();
 
-    this.layout = this.computeLayout();
-    this.selectedSession = this.pickSelectedSession();
-    this.quarters = this.buildQuarters();
-    this.hoveredQuarterKey = this.hoveredQuarterIndex >= 0
-      ? this.quarters[this.hoveredQuarterIndex]?.key ?? null
-      : null;
-    this.opsSummary = buildOpsSummary(this.activity);
-    this.pushSelectedModelToNavbar();
+    this.refreshActivityViewState(true);
 
     this.drawBackground();
     this.drawQuarters();
     this.publishDashboardView();
+    this.lastFullRenderAt = performance.now();
+    this.lastLiveDashboardPublishAt = this.lastFullRenderAt;
   }
 
   private renderMapOnly() {
@@ -1150,9 +1461,10 @@ export class MissionControlScene extends Phaser.Scene {
       // (aspect 0.9-1.5), so a 0.72 box fills the halo nicely without
       // overflowing the bracket frame — the halo now nearly fills the
       // selector width while leaving the sprite as the focal point.
-      const spriteBox = size * 0.72;
+      const spriteBox = size * 0.72 * (QUARTER_SPRITE_SCALE[quarter.key] ?? 1);
       const fit = this.fitSpriteToBox(texture, spriteBox, spriteBox);
-      const sprite = this.add.image(quarter.x, haloCenterY, SPACE_ATLAS_KEY, texture)
+      const spriteY = haloCenterY + (QUARTER_SPRITE_Y_OFFSETS[quarter.key] ?? 0) * pedestalUnit;
+      const sprite = this.add.image(quarter.x, spriteY, SPACE_ATLAS_KEY, texture)
         .setOrigin(0.5, 0.5)
         .setDepth(7)
         .setAlpha(focused ? 1 : 0.9);
@@ -1168,7 +1480,17 @@ export class MissionControlScene extends Phaser.Scene {
       const countY = labelY + labelSize / 2 + 6 + countSize / 2;
       const countColor = colorToCss(quarterTextColor(quarter.color));
       this.addText(quarter.x, labelY, quarter.short, labelSize, theme.text).setOrigin(0.5);
-      this.addText(quarter.x, countY, String(quarter.count), countSize, countColor).setOrigin(0.5);
+      const countText = this.addText(quarter.x, countY, String(quarter.count), countSize, countColor).setOrigin(0.5);
+      this.quarterCountTextObjects.set(quarter.key, countText);
+    }
+  }
+
+  private updateQuarterCountLabels() {
+    for (const quarter of this.quarters) {
+      const countText = this.quarterCountTextObjects.get(quarter.key);
+      if (countText && countText.text !== String(quarter.count)) {
+        countText.setText(String(quarter.count));
+      }
     }
   }
 
@@ -1249,7 +1571,9 @@ export class MissionControlScene extends Phaser.Scene {
     this.moatGeometry = {
       x: moatCx,
       y: moatCy,
-      radius: moatOuterR - Math.max(6, 10 * castleScale) / 2,
+      // The pooled ring texture's stroke sits inside its frame, so the
+      // display radius must be larger than the water disk to glow outside.
+      radius: moatOuterR + 24 * castleScale,
       active: active > 0,
     };
 
@@ -1324,6 +1648,7 @@ export class MissionControlScene extends Phaser.Scene {
       category: quarter.key,
       color: colorToCss(quarter.color),
       title: quarter.short,
+      count: quarter.count,
       countLine: `${quarter.count} selected-session ${quarter.short.toLowerCase()} signals`,
       line: quarterStats.line,
       toolList: quarterStats.toolList ?? '',
@@ -1338,8 +1663,25 @@ export class MissionControlScene extends Phaser.Scene {
     }
   }
 
+  private publishLiveDashboardView() {
+    if (!window.__cmcRenderLiveDashboard) {
+      this.publishDashboardView();
+      return;
+    }
+    const view = this.buildDashboardView();
+    if (!view) return;
+    window.__cmcRenderLiveDashboard(view);
+  }
+
   private publishDashboardView() {
-    if (!window.__cmcRenderDashboard || !this.layout) return;
+    if (!window.__cmcRenderDashboard) return;
+    const view = this.buildDashboardView();
+    if (!view) return;
+    window.__cmcRenderDashboard(view);
+  }
+
+  private buildDashboardView() {
+    if (!this.layout) return null;
     const layout = this.layout;
     const compact = layout.compact;
     const sessionOptions = this.getSessionPickerOptions();
@@ -1394,7 +1736,7 @@ export class MissionControlScene extends Phaser.Scene {
       atLive,
       cursorTimeMs,
     );
-    window.__cmcRenderDashboard({
+    return {
       panelsHidden: this.panelsHidden,
       layout: {
         leftX: layout.leftX,
@@ -1447,7 +1789,7 @@ export class MissionControlScene extends Phaser.Scene {
         total,
         status: replayStatus,
       },
-    });
+    };
   }
 
   private buildSelectedSessionView(
@@ -1557,12 +1899,13 @@ export class MissionControlScene extends Phaser.Scene {
   }
 
   private ingestActivityEvents(events: CopilotEventSummary[]) {
-    if (events.length === 0) return;
+    if (events.length === 0) return 0;
     const wasAtLive = this.isAtLive();
     const chronological = [...events].reverse();
     const appended: CopilotEventSummary[] = [];
     const nowMs = performance.now();
     for (const event of chronological) {
+      if (!this.isAfterReset(event.timestamp)) continue;
       const key = eventKey(event);
       if (this.seenEventKeys.has(key)) continue;
       this.seenEventKeys.add(key);
@@ -1591,7 +1934,7 @@ export class MissionControlScene extends Phaser.Scene {
         }
       }
     }
-    if (appended.length === 0) return;
+    if (appended.length === 0) return 0;
 
     if (this.eventLog.length > this.replayMaxEvents) {
       const trim = this.eventLog.length - this.replayMaxEvents;
@@ -1602,9 +1945,16 @@ export class MissionControlScene extends Phaser.Scene {
 
     if (wasAtLive && !this.replayPaused && this.bootstrapCompleted) {
       if (this.quarters.length > 0) {
-        for (let i = 0; i < appended.length; i++) {
-          this.queueEventPulse(appended[i], 'live', i * PULSE_STAGGER_MS);
+        const latestPulseByQuarter = new Map<MissionCategory, CopilotEventSummary>();
+        for (const event of appended) {
+          if (event.kind !== 'tool.execution_start' && event.kind !== 'hook.start') continue;
+          const quarterKey = quarterKeyForEvent(event);
+          if (!quarterKey) continue;
+          latestPulseByQuarter.set(quarterKey, event);
         }
+        Array.from(latestPulseByQuarter.values()).forEach((event, i) => {
+          this.queueEventPulse(event, 'live', i * PULSE_STAGGER_MS);
+        });
       }
       this.replayCursor = this.eventLog.length;
     } else if (wasAtLive && !this.replayPaused) {
@@ -1613,6 +1963,7 @@ export class MissionControlScene extends Phaser.Scene {
       this.replayCursor = this.eventLog.length;
     }
     this.updateReplayState();
+    return appended.length;
   }
 
   /// Per-frame attention escalation. Fires bell + OS notification when
@@ -1737,12 +2088,11 @@ export class MissionControlScene extends Phaser.Scene {
       arrived: false,
       source,
     });
-    this.activeEventPulseCount = this.eventPulses.length;
+    this.activeEventPulseCount = this.eventPulses.length + this.arrivalEffects.length;
   }
 
   private updateEventPulses(delta: number) {
-    if (!this.flow) return;
-    this.flow.clear();
+    this.hidePulseVisuals();
     if (this.eventPulses.length === 0 && this.arrivalEffects.length === 0) {
       this.activeEventPulseCount = 0;
       return;
@@ -1750,33 +2100,21 @@ export class MissionControlScene extends Phaser.Scene {
 
     const s = sceneScale();
     const headSize = 8 * s;
-    const halfHead = headSize / 2;
-    // Pre-derived trail sizes so we don't recompute per pulse.
-    // Each sample i in [1..PULSE_TRAIL_SAMPLES] shrinks the size and
-    // alpha linearly toward the back so the tail tapers off as a wisp.
-    // Pre-computed once per frame — was per-sample-per-pulse before.
-    const trailSizes = new Array(PULSE_TRAIL_SAMPLES);
-    const trailHalves = new Array(PULSE_TRAIL_SAMPLES);
-    const trailAlphas = new Array(PULSE_TRAIL_SAMPLES);
-    for (let i = 1; i <= PULSE_TRAIL_SAMPLES; i++) {
-      const t = i / PULSE_TRAIL_SAMPLES;
-      const sz = headSize * (1 - t * 0.65);
-      trailSizes[i - 1] = sz;
-      trailHalves[i - 1] = sz / 2;
-      trailAlphas[i - 1] = 0.32 * (1 - t);
-    }
+    let activePulseWrite = 0;
 
     for (const pulse of this.eventPulses) {
       pulse.delay -= delta;
-      if (pulse.delay > 0) continue;
+      if (pulse.delay > 0) {
+        this.eventPulses[activePulseWrite++] = pulse;
+        continue;
+      }
       pulse.progress = Math.min(1, pulse.progress + delta / pulse.duration);
 
       // Glowing comet tail — sample the bezier path BEHIND the head.
-      // Math is inlined (no pulsePoint(...spread) call) — that previous
-      // spread allocated a fresh object 4× per pulse per frame which
-      // showed up as GC stutter once a few pulses were in flight.
-      // We also use fillRect (matches the head silhouette and is
-      // cheaper than fillCircle on the WebGL Graphics pipeline).
+      // Each sample is a pooled/tinted Image quad. Phaser's Graphics docs
+      // call out per-frame Graphics drawing as expensive because geometry
+      // is rebuilt every render; pooled Images keep this on the fast
+      // texture-batch path during live bursts.
       for (let i = 0; i < PULSE_TRAIL_SAMPLES; i++) {
         const sampleProgress = pulse.progress - (i + 1) * PULSE_TRAIL_SPACING_PROGRESS;
         if (sampleProgress <= 0) continue;
@@ -1791,22 +2129,28 @@ export class MissionControlScene extends Phaser.Scene {
           tx = pulse.endX;
           ty = pulse.startY + (pulse.endY - pulse.startY) * local;
         }
-        const sz = trailSizes[i];
-        const half = trailHalves[i];
-        this.flow.fillStyle(pulse.color, trailAlphas[i]);
-        this.flow.fillRect(snap(tx - half), snap(ty - half), snap(sz), snap(sz));
+        const trailT = (i + 1) / PULSE_TRAIL_SAMPLES;
+        const sz = headSize * (1 - trailT * 0.65);
+        this.showPooledImage(this.nextPulseVisual(), tx, ty, sz, pulse.color, 0.32 * (1 - trailT));
       }
 
       // Pulse head — soft square halo + crisp inner box. Both are
-      // rects, both blend additively via the flow layer's once-set
+      // pooled quads, both blend additively via their once-set
       // ADD blend mode. The halo is ~2× the head size to bloom under
       // the additive blend without smearing.
-      const point = pulsePoint(pulse);
-      const haloHalf = headSize;
-      this.flow.fillStyle(pulse.color, 0.22);
-      this.flow.fillRect(snap(point.x - haloHalf), snap(point.y - haloHalf), snap(haloHalf * 2), snap(haloHalf * 2));
-      this.flow.fillStyle(pulse.color, 0.95);
-      this.flow.fillRect(snap(point.x - halfHead), snap(point.y - halfHead), snap(headSize), snap(headSize));
+      let headX: number;
+      let headY: number;
+      if (pulse.progress < 0.55) {
+        const local = pulse.progress / 0.55;
+        headX = pulse.startX + (pulse.midX - pulse.startX) * local;
+        headY = pulse.startY;
+      } else {
+        const local = (pulse.progress - 0.55) / 0.45;
+        headX = pulse.endX;
+        headY = pulse.startY + (pulse.endY - pulse.startY) * local;
+      }
+      this.showPooledImage(this.nextPulseVisual(), headX, headY, headSize * 2, pulse.color, 0.22);
+      this.showPooledImage(this.nextPulseVisual(), headX, headY, headSize, pulse.color, 0.95);
 
       if (pulse.progress >= 1 && !pulse.arrived) {
         pulse.arrived = true;
@@ -1826,12 +2170,15 @@ export class MissionControlScene extends Phaser.Scene {
           }
         }
       }
+      if (pulse.progress < 1) this.eventPulses[activePulseWrite++] = pulse;
     }
+    this.eventPulses.length = activePulseWrite;
 
     // Arrival sigils — expanding ring + soft inner fill that fades as
     // it grows. Eased so the bloom is fast early then settles.
-    // Strokes are cheaper than nested fills; one stroke + one fill per
-    // sigil per frame keeps the cost bounded.
+    // Uses the same pooled Image path as comet heads so landing blooms
+    // avoid per-frame Graphics geometry rebuilds.
+    let activeArrivalWrite = 0;
     for (const eff of this.arrivalEffects) {
       eff.age += delta;
       const t = eff.age >= eff.lifetime ? 1 : eff.age / eff.lifetime;
@@ -1840,18 +2187,26 @@ export class MissionControlScene extends Phaser.Scene {
       const radius = ARRIVAL_MAX_RADIUS_PX * s * eased;
       const ringAlpha = 0.75 * (1 - t);
       const fillAlpha = 0.18 * (1 - t * t);
-      const ringWidth = Math.max(2, 4 * s * (1 - t));
-      const ex = snap(eff.x);
-      const ey = snap(eff.y);
-      this.flow.fillStyle(eff.color, fillAlpha);
-      this.flow.fillCircle(ex, ey, radius);
-      this.flow.lineStyle(ringWidth, eff.color, ringAlpha);
-      this.flow.strokeCircle(ex, ey, radius);
+      const pair = this.nextArrivalVisualPair();
+      const scale = Math.max(0.01, (radius * 2) / ARRIVAL_TEXTURE_SIZE);
+      pair.fill
+        .setPosition(snap(eff.x), snap(eff.y))
+        .setScale(scale)
+        .setTint(eff.color)
+        .setAlpha(fillAlpha)
+        .setActive(true)
+        .setVisible(true);
+      pair.ring
+        .setPosition(snap(eff.x), snap(eff.y))
+        .setScale(scale)
+        .setTint(eff.color)
+        .setAlpha(ringAlpha)
+        .setActive(true)
+        .setVisible(true);
+      if (eff.age < eff.lifetime) this.arrivalEffects[activeArrivalWrite++] = eff;
     }
-
-    this.eventPulses = this.eventPulses.filter(pulse => pulse.progress < 1);
-    this.arrivalEffects = this.arrivalEffects.filter(eff => eff.age < eff.lifetime);
-    this.activeEventPulseCount = this.eventPulses.length;
+    this.arrivalEffects.length = activeArrivalWrite;
+    this.activeEventPulseCount = this.eventPulses.length + this.arrivalEffects.length;
   }
 
   /// Reserved for future per-pulse-arrival hook. Currently a no-op:
@@ -1874,7 +2229,7 @@ export class MissionControlScene extends Phaser.Scene {
     this.demoFlowTimer = 0;
 
     const event = createDemoEvent(this.demoFlowIndex++);
-    this.activity = applyDemoEvent(this.activity, event);
+    this.setActivity(applyDemoEvent(this.rawActivity, event));
     this.ingestActivityEvents([event]);
     this.renderActivity();
   }
@@ -1904,7 +2259,7 @@ export class MissionControlScene extends Phaser.Scene {
     this.replayCursor = clamped;
     this.replayPlayTimer = 0;
     this.eventPulses = this.eventPulses.filter(p => p.source === 'live' && !p.arrived);
-    this.activeEventPulseCount = this.eventPulses.length;
+    this.activeEventPulseCount = this.eventPulses.length + this.arrivalEffects.length;
     this.updateReplayState();
     this.renderActivity();
   }
@@ -1922,7 +2277,7 @@ export class MissionControlScene extends Phaser.Scene {
     this.replayCursor = this.eventLog.length;
     this.replayPlayTimer = 0;
     this.eventPulses = this.eventPulses.filter(p => p.source === 'live' && !p.arrived);
-    this.activeEventPulseCount = this.eventPulses.length;
+    this.activeEventPulseCount = this.eventPulses.length + this.arrivalEffects.length;
     this.updateReplayState();
     this.renderActivity();
   }
@@ -2041,6 +2396,7 @@ export class MissionControlScene extends Phaser.Scene {
   private clearDynamicObjects() {
     for (const text of this.textObjects) text.destroy();
     this.textObjects = [];
+    this.quarterCountTextObjects.clear();
     this.sessionPickerRows = [];
   }
 }
@@ -2331,6 +2687,7 @@ function normalizeActivity(activity: CopilotActivity): CopilotActivity {
       ...session,
       recent_tool_calls: session.recent_tool_calls ?? [],
       recent_turns: session.recent_turns ?? [],
+      token_checkpoints: session.token_checkpoints ?? [],
     })),
     tools: activity.tools ?? [],
     recent_events: activity.recent_events ?? [],
@@ -2358,22 +2715,6 @@ function quarterKeyForEvent(event: CopilotEventSummary): MissionCategory | null 
   // pulse — that previously created the illusion of work flowing into
   // Intent (the prior fallthrough) without the count ever changing.
   return null;
-}
-
-function pulsePoint(pulse: EventPulse) {
-  const p = clamp(pulse.progress, 0, 1);
-  if (p < 0.55) {
-    const local = p / 0.55;
-    return {
-      x: pulse.startX + (pulse.midX - pulse.startX) * local,
-      y: pulse.startY,
-    };
-  }
-  const local = (p - 0.55) / 0.45;
-  return {
-    x: pulse.endX,
-    y: pulse.startY + (pulse.endY - pulse.startY) * local,
-  };
 }
 
 function categoryColor(category: string) {
@@ -2523,6 +2864,44 @@ function eventBelongsToSession(event: CopilotEventSummary, sessionId: string) {
     || event.session_id.startsWith(sessionId);
 }
 
+function categoryCountsFromToolCalls(calls: SessionToolCall[]): Record<string, number> {
+  const counts: Record<string, number> = {
+    forge: 0,
+    library: 0,
+    terminal: 0,
+    signal: 0,
+    hooks: 0,
+    delegates: 0,
+    skills: 0,
+    court: 0,
+    mcp: 0,
+  };
+  for (const call of calls) {
+    if (call.category === 'terminal' && call.success === false) continue;
+    counts[call.category] = (counts[call.category] ?? 0) + 1;
+  }
+  return counts;
+}
+
+function summarizeToolCalls(calls: SessionToolCall[]): CopilotToolMetric[] {
+  const metrics = new Map<string, CopilotToolMetric>();
+  for (const call of calls) {
+    const name = call.tool || 'tool';
+    const key = `${call.category}|${name}`;
+    const existing = metrics.get(key);
+    if (existing) {
+      existing.count += 1;
+    } else {
+      metrics.set(key, { name, category: call.category, count: 1 });
+    }
+  }
+  return Array.from(metrics.values()).sort((a, b) => b.count - a.count);
+}
+
+function validResetAtMs(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
+}
+
 const PREFS_KEY = 'cmc_prefs';
 
 interface MissionPrefs {
@@ -2531,6 +2910,8 @@ interface MissionPrefs {
   inspectedQuarterKey?: string | null;
   replayPaused?: boolean;
   lastSelectedSessionId?: string | null;
+  activityResetAtMs?: number | null;
+  activityResetTokenBaselines?: Record<string, ActivityTokenBaseline>;
 }
 
 function loadMissionPrefs(): MissionPrefs {

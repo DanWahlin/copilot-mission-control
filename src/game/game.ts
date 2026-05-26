@@ -23,7 +23,15 @@ function initGame() {
     height: H,
     backgroundColor: '#0a0e22',
     scene: [MissionControlScene],
-    render: { pixelArt: true, antialias: false },
+    render: {
+      // The mission sprites are detailed painted atlas frames, not
+      // pixel art. Linear filtering preserves their source detail when
+      // Phaser scales them to fit responsive sector cards.
+      pixelArt: false,
+      antialias: true,
+      antialiasGL: true,
+      roundPixels: false,
+    },
     fps: { target: 60 },
   });
 

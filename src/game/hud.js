@@ -76,6 +76,7 @@
   // -------------------------------------------------------------------
 
   var modelEl = $('model-chip');
+  var resetBtn = $('reset-btn');
   var lastModel = '';
 
   window.__cmcUpdateModel = function (model) {
@@ -94,6 +95,14 @@
     }
   };
 
+  if (resetBtn) {
+    resetBtn.addEventListener('click', function () {
+      if (typeof window.__cmcResetActivityStats === 'function') {
+        window.__cmcResetActivityStats();
+      }
+    });
+  }
+
   // -------------------------------------------------------------------
   // HTML Inspector overlay. Phaser owns the map; this DOM view owns the
   // dense drill-down so native scrolling/wrapping/keyboard close work
@@ -104,10 +113,13 @@
   var inspectorTitle = $('inspector-title');
   var inspectorSubtitle = $('inspector-subtitle');
   var inspectorClose = $('inspector-close');
+  var inspectorToolbar = inspectorOverlay && inspectorOverlay.querySelector('.inspector-toolbar');
   var inspectorTabs = $('inspector-tabs');
   var inspectorList = $('inspector-list');
   var inspectorDetail = $('inspector-detail');
   var inspectorSession = null;
+  var inspectorScope = 'session';
+  var sectorInspectorContext = null;
   var inspectorMode = 'tools';
   var inspectorTab = 'all';
   var selectedToolKey = '';
@@ -233,6 +245,9 @@
 
   function filteredCalls() {
     var calls = ((inspectorSession && inspectorSession.recent_tool_calls) || []).slice().reverse();
+    if (inspectorScope === 'sector' && sectorInspectorContext) {
+      return calls.filter(function (call) { return call.category === sectorInspectorContext.category; });
+    }
     if (inspectorTab === 'all') return calls;
     if (inspectorTab === 'failures') return calls.filter(function (call) { return !call.success; });
     return calls.filter(function (call) { return call.category === inspectorTab; });
@@ -264,6 +279,11 @@
     return visible + (names.length > 8 ? ' +' + (names.length - 8) + ' more' : '');
   }
 
+  function turnToolTotal(turn, related) {
+    var counted = Number(turn.tool_count || 0);
+    return Math.max(Number.isFinite(counted) ? counted : 0, (turn.tools || []).length, related.length);
+  }
+
   function kvRows(rows) {
     return '<dl class="inspector-kv">' + rows.map(function (row) {
       return '<dt>' + escapeHtml(row[0]) + '</dt><dd>' + escapeHtml(row[1]) + '</dd>';
@@ -285,13 +305,19 @@
     return state.details && state.details.raw_output ? state.details.raw_output : 'not retained by provider schema';
   }
 
+  function hasRawDetailPayload(details) {
+    return !!(details && (details.raw_args || details.raw_output));
+  }
+
   function renderRevealPanel(call, state) {
+    if (!call.event_ref) return '';
+    if (state && state.status === 'ready' && !hasRawDetailPayload(state.details)) {
+      return '<div class="inspector-reveal"><div class="inspector-empty">No raw local details were retained for this call.</div></div>';
+    }
     var buttonLabel = state && state.status === 'ready' ? 'Refresh raw local details' : 'Reveal raw local details';
-    var disabled = !call.event_ref || (state && state.status === 'loading');
+    var disabled = state && state.status === 'loading';
     var status = '';
-    if (!call.event_ref) {
-      status = '<div class="inspector-empty">Raw reveal is unavailable for this retained call.</div>';
-    } else if (state && state.status === 'loading') {
+    if (state && state.status === 'loading') {
       status = '<div class="inspector-empty">Loading raw local details...</div>';
     } else if (state && state.status === 'error') {
       status = '<div class="inspector-empty">Reveal failed: ' + escapeHtml(state.error || 'unknown error') + '</div>';
@@ -307,7 +333,7 @@
 
   function renderTabs() {
     if (!inspectorTabs) return;
-    if (inspectorMode !== 'tools') {
+    if (inspectorScope === 'sector' || inspectorMode !== 'tools') {
       inspectorTabs.innerHTML = '';
       inspectorTabs.hidden = true;
       return;
@@ -322,6 +348,15 @@
   function renderToolList(calls, selected) {
     if (!inspectorList) return;
     if (!calls.length) {
+      if (inspectorScope === 'sector' && sectorInspectorContext) {
+        var total = Number(sectorInspectorContext.count || 0);
+        var sector = sectorInspectorContext.title || categoryLabel(sectorInspectorContext.category);
+        var message = total > 0
+          ? 'This sector recorded ' + exactNumber(total) + ' selected-session signals, but no detailed rows are in the retained call window.'
+          : 'No retained rows for the selected ' + sector + ' sector.';
+        inspectorList.innerHTML = '<div class="inspector-empty">' + escapeHtml(message) + '</div>';
+        return;
+      }
       inspectorList.innerHTML = '<div class="inspector-empty">No ' + escapeHtml(inspectorTab) + ' calls retained for this session.</div>';
       return;
     }
@@ -342,6 +377,15 @@
   function renderToolDetail(call) {
     if (!inspectorDetail) return;
     if (!call) {
+      if (inspectorScope === 'sector' && sectorInspectorContext) {
+        var total = Number(sectorInspectorContext.count || 0);
+        inspectorDetail.innerHTML = '<h3>Sector details</h3>' + kvRows([
+          ['Sector', sectorInspectorContext.title || categoryLabel(sectorInspectorContext.category)],
+          ['Signals', exactNumber(total)],
+          ['Retained rows', '0'],
+        ]) + '<div class="inspector-empty">Select a retained row when one is available.</div>';
+        return;
+      }
       inspectorDetail.innerHTML = '<h3>Safe details</h3><div class="inspector-empty">Select a tool call to inspect.</div>';
       return;
     }
@@ -390,19 +434,25 @@
       return;
     }
     var related = callsForTurn(turn).slice().reverse();
+    var totalTools = turnToolTotal(turn, related);
+    var ranTools = turnToolList(turn);
     var toolDetails = turnToolDetailList(turn);
     var rows = [
       ['Status', (turn.status || 'unknown') + (turn.partial ? ' · partial tail window' : '')],
       ['Started', (formatClock(turn.started_at) || 'unknown') + ' · ' + (turn.started_at || 'unknown')],
       ['Duration', turnDurationLabel(turn)],
-      ['Tools', String(turn.tool_count || 0)],
-      ['Ran', turnToolList(turn)],
+      ['Tools', String(totalTools)],
+      ['Ran', ranTools],
       ['Tool details', toolDetails || 'none retained'],
       ['Failures', String(turn.failure_count || 0)],
       ['Categories', (turn.categories || []).join(', ') || 'none'],
       ['Model', turn.model || 'unknown'],
       ['Output', compactNumber(turn.output_tokens || 0) + ' tokens'],
     ];
+    var missingToolNames = ranTools && ranTools !== 'none retained' ? ' (' + escapeHtml(ranTools) + ')' : '';
+    var emptyRelated = totalTools > 0
+      ? 'This turn recorded ' + totalTools + ' tools' + missingToolNames + ', but no detailed rows are in the retained call window.'
+      : 'No tool rows in the retained call window.';
     var relatedHtml = related.length
       ? '<div class="inspector-related">' + related.slice(0, 12).map(function (call) {
           var fullName = toolDisplayName(call);
@@ -414,26 +464,50 @@
             + '<span class="inspector-related-meta">' + escapeHtml(callStatusMeta(call)) + '</span>'
             + '</div>';
         }).join('') + '</div>'
-      : '<div class="inspector-empty">No tool rows in the retained call window.</div>';
+      : '<div class="inspector-empty">' + emptyRelated + '</div>';
     inspectorDetail.innerHTML = '<h3>Turn story</h3>' + kvRows(rows)
-      + '<div class="inspector-related-title">Tools in this turn (' + related.length + ')</div>'
+      + '<div class="inspector-related-title">Retained tool rows (' + related.length + ' of ' + totalTools + ')</div>'
       + relatedHtml;
   }
 
   function renderInspector() {
     if (!inspectorSession) return;
-    if (inspectorTitle) inspectorTitle.textContent = 'Inspector · ' + (inspectorSession.title || inspectorSession.id || 'session');
-    if (inspectorSubtitle) {
-      var calls = (inspectorSession.recent_tool_calls || []).length;
-      var turns = (inspectorSession.recent_turns || []).length;
-      inspectorSubtitle.textContent = (inspectorSession.repository || 'unknown repo') + ' / ' + (inspectorSession.branch || 'unknown') + ' · ' + calls + ' calls · ' + turns + ' turns';
+    var sectorCalls = inspectorScope === 'sector' ? filteredCalls() : null;
+    if (inspectorToolbar) inspectorToolbar.hidden = inspectorScope === 'sector';
+    if (inspectorScope === 'sector' && sectorInspectorContext) {
+      if (inspectorTitle) {
+        inspectorTitle.innerHTML = '<span class="inspector-title-swatch" style="--swatch:' + escapeHtml(sectorInspectorContext.color || CATEGORY_COLORS[sectorInspectorContext.category] || '#ffd54a') + '"></span>'
+          + escapeHtml((sectorInspectorContext.title || categoryLabel(sectorInspectorContext.category)) + ' details · ' + (inspectorSession.title || inspectorSession.id || 'session'));
+      }
+      if (inspectorSubtitle) {
+        var retained = sectorCalls ? sectorCalls.length : 0;
+        var total = Number(sectorInspectorContext.count || 0);
+        inspectorSubtitle.textContent = (inspectorSession.repository || 'unknown repo') + ' / ' + (inspectorSession.branch || 'unknown')
+          + ' · ' + retained + ' retained rows · ' + exactNumber(total) + ' selected-session signals';
+      }
+    } else {
+      if (inspectorTitle) inspectorTitle.textContent = 'Inspector · ' + (inspectorSession.title || inspectorSession.id || 'session');
+      if (inspectorSubtitle) {
+        var calls = (inspectorSession.recent_tool_calls || []).length;
+        var turns = (inspectorSession.recent_turns || []).length;
+        inspectorSubtitle.textContent = (inspectorSession.repository || 'unknown repo') + ' / ' + (inspectorSession.branch || 'unknown') + ' · ' + calls + ' calls · ' + turns + ' turns';
+      }
     }
-    document.querySelectorAll('[data-inspector-mode]').forEach(function (btn) {
-      var active = btn.getAttribute('data-inspector-mode') === inspectorMode;
-      btn.classList.toggle('active', active);
-      btn.setAttribute('aria-pressed', active ? 'true' : 'false');
-    });
+    if (inspectorScope !== 'sector') {
+      document.querySelectorAll('[data-inspector-mode]').forEach(function (btn) {
+        var active = btn.getAttribute('data-inspector-mode') === inspectorMode;
+        btn.classList.toggle('active', active);
+        btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+      });
+    }
     renderTabs();
+    if (inspectorScope === 'sector') {
+      var sectorCall = selectedCall(sectorCalls || []);
+      selectedToolKey = sectorCall ? toolKey(sectorCall) : '';
+      renderToolList(sectorCalls || [], sectorCall);
+      renderToolDetail(sectorCall);
+      return;
+    }
     if (inspectorMode === 'tools') {
       var callsForTab = filteredCalls();
       var call = selectedCall(callsForTab);
@@ -461,7 +535,7 @@
   function restoreInspectorFocus() {
     var target = inspectorReturnFocus && document.contains(inspectorReturnFocus)
       ? inspectorReturnFocus
-      : document.querySelector('#dom-session [data-cmc-action="inspector"]');
+      : document.querySelector(inspectorScope === 'sector' ? '#dom-quarter [data-cmc-action="quarter-details"]' : '#dom-session [data-cmc-action="inspector"]');
     inspectorReturnFocus = null;
     if (target && typeof target.focus === 'function' && !target.disabled) {
       setTimeout(function () { target.focus(); }, 0);
@@ -472,8 +546,37 @@
     if (!inspectorOverlay || !session) return false;
     inspectorReturnFocus = trigger || document.activeElement;
     inspectorSession = session;
+    inspectorScope = 'session';
+    sectorInspectorContext = null;
     inspectorMode = 'tools';
     inspectorTab = 'all';
+    selectedToolKey = '';
+    selectedTurnId = '';
+    rawRevealState = null;
+    inspectorOverlay.classList.add('visible');
+    inspectorOverlay.setAttribute('aria-hidden', 'false');
+    renderInspector();
+    setTimeout(function () {
+      var first = focusableInspectorElements()[0];
+      if (first) first.focus();
+      else if (inspectorList) inspectorList.focus();
+    }, 0);
+    return true;
+  }
+
+  function openSectorInspector(session, sector, trigger) {
+    if (!inspectorOverlay || !session || !sector || !sector.category) return false;
+    inspectorReturnFocus = trigger || document.activeElement;
+    inspectorSession = session;
+    inspectorScope = 'sector';
+    sectorInspectorContext = {
+      category: sector.category,
+      title: sector.title || categoryLabel(sector.category),
+      count: Number(sector.count || 0),
+      color: sector.color || CATEGORY_COLORS[sector.category] || '#ffd54a',
+    };
+    inspectorMode = 'tools';
+    inspectorTab = sectorInspectorContext.category;
     selectedToolKey = '';
     selectedTurnId = '';
     rawRevealState = null;
@@ -495,6 +598,8 @@
     inspectorOverlay.setAttribute('aria-hidden', 'true');
     rawRevealState = null;
     if (wasOpen) restoreInspectorFocus();
+    sectorInspectorContext = null;
+    inspectorScope = 'session';
   }
 
   function tauriInvoke() {
@@ -532,6 +637,7 @@
   }
 
   window.__cmcOpenInspector = openInspector;
+  window.__cmcOpenSectorInspector = openSectorInspector;
   window.__cmcCloseInspector = closeInspector;
 
   if (inspectorClose) inspectorClose.addEventListener('click', closeInspector);
@@ -617,6 +723,12 @@
   var lastDashboard = null;
   var activeSchemaDriftReport = null;
   var lastSchemaDriftFingerprint = '';
+  var liveFingerprints = {
+    session: '',
+    feed: '',
+    quarter: '',
+    replay: '',
+  };
 
   var CATEGORY_COLORS = {
     forge: '#f0911d',
@@ -630,6 +742,23 @@
     mcp: '#45cea5',
     alert: '#ff5252',
   };
+
+  var CATEGORY_LABELS = {
+    forge: 'Edits',
+    library: 'Reads',
+    terminal: 'Commands',
+    signal: 'Web/Docs',
+    hooks: 'Hooks',
+    delegates: 'Sub-Agents',
+    skills: 'Skills',
+    court: 'Intent',
+    mcp: 'MCP',
+    alert: 'Failures',
+  };
+
+  function categoryLabel(category) {
+    return CATEGORY_LABELS[category] || category || 'Sector';
+  }
 
   function setPanelRect(el, rect) {
     if (!el || !rect) return;
@@ -792,9 +921,19 @@
       return;
     }
     domQuarter.style.setProperty('--quarter-color', q.color || CATEGORY_COLORS[q.category] || '#ffd54a');
+    var count = Number(q.count || 0);
+    var disabled = count <= 0;
     body.innerHTML = '<div class="cmc-quarter-line">' + escapeHtml(q.countLine) + '</div>'
       + '<div class="cmc-quarter-line">' + escapeHtml(q.line) + '</div>'
-      + (q.toolList ? '<div class="cmc-quarter-tools cmc-muted">' + escapeHtml(q.toolList) + '</div>' : '');
+      + (q.toolList ? '<div class="cmc-quarter-tools cmc-muted">' + escapeHtml(q.toolList) + '</div>' : '')
+      + '<div class="cmc-actions cmc-quarter-actions">'
+      + '<button class="cmc-button accent ' + (disabled ? 'disabled' : '') + '" type="button" aria-label="Open details for ' + escapeHtml(q.title || categoryLabel(q.category)) + ' sector" aria-haspopup="dialog" '
+      + (disabled ? 'disabled aria-disabled="true"' : 'data-cmc-action="quarter-details"')
+      + ' data-sector-category="' + escapeHtml(q.category || '') + '"'
+      + ' data-sector-title="' + escapeHtml(q.title || categoryLabel(q.category)) + '"'
+      + ' data-sector-count="' + escapeHtml(count) + '"'
+      + ' data-sector-color="' + escapeHtml(q.color || CATEGORY_COLORS[q.category] || '#ffd54a') + '">Details</button>'
+      + '</div>';
   }
 
   function renderQuarter(view) {
@@ -834,6 +973,82 @@
     if (fill) fill.style.width = pct + '%';
     if (knob) knob.style.left = pct + '%';
     if (status) status.textContent = replay.status;
+  }
+
+  function sessionFingerprint(view) {
+    var sessions = (view && view.sessions) || {};
+    var selected = sessions.selected || {};
+    var activity = selected.replay_activity || selectedActivity(selected);
+    var options = sessions.options || [];
+    return [
+      sessions.header || '',
+      options.map(function (opt) {
+        return [
+          opt.id || '',
+          opt.title || '',
+          opt.shortId || '',
+          opt.isActive ? '1' : '0',
+        ].join(':');
+      }).join('|'),
+      selected.id || '',
+      selected.title || '',
+      selected.git_root || '',
+      selected.input_tokens || 0,
+      selected.output_tokens || 0,
+      (selected.recent_tool_calls || []).length,
+      activity.last || '',
+      activity.tool || '',
+      activity.age || '',
+    ].join('::');
+  }
+
+  function feedFingerprint(view) {
+    var feed = (view && view.feed) || {};
+    var rows = feed.rows || [];
+    return [
+      feed.title || '',
+      feed.empty || '',
+      rows.map(function (row) {
+        return [
+          row.label || '',
+          row.age || '',
+          row.category || '',
+          row.success ? '1' : '0',
+        ].join(':');
+      }).join('|'),
+    ].join('::');
+  }
+
+  function quarterFingerprint(view) {
+    var q = view && view.quarter;
+    if (!q) return '';
+    return [
+      q.category || '',
+      q.color || '',
+      q.title || '',
+      q.count || 0,
+      q.countLine || '',
+      q.line || '',
+      q.toolList || '',
+    ].join('::');
+  }
+
+  function replayFingerprint(view) {
+    var replay = (view && view.replay) || {};
+    return [
+      replay.total || 0,
+      replay.cursor || 0,
+      replay.paused ? '1' : '0',
+      replay.atLive ? '1' : '0',
+      replay.status || '',
+    ].join('::');
+  }
+
+  function updateLiveFingerprints(view) {
+    liveFingerprints.session = sessionFingerprint(view);
+    liveFingerprints.feed = feedFingerprint(view);
+    liveFingerprints.quarter = quarterFingerprint(view);
+    liveFingerprints.replay = replayFingerprint(view);
   }
 
   function schemaDriftFingerprint(report) {
@@ -982,12 +1197,40 @@
     renderFeed(view);
     renderQuarter(view);
     renderReplay(view);
+    updateLiveFingerprints(view);
     maybeShowSchemaDrift(view);
+  };
+
+  window.__cmcRenderLiveDashboard = function (view) {
+    lastDashboard = view;
+    document.body.classList.add('dashboard-ready');
+    if (domLoading) domLoading.setAttribute('aria-hidden', 'true');
+    var nextSession = sessionFingerprint(view);
+    var nextFeed = feedFingerprint(view);
+    var nextQuarter = quarterFingerprint(view);
+    var nextReplay = replayFingerprint(view);
+    if (nextSession !== liveFingerprints.session) {
+      renderSession(view);
+      liveFingerprints.session = nextSession;
+    }
+    if (nextFeed !== liveFingerprints.feed) {
+      renderFeed(view);
+      liveFingerprints.feed = nextFeed;
+    }
+    if (nextQuarter !== liveFingerprints.quarter) {
+      renderQuarter(view);
+      liveFingerprints.quarter = nextQuarter;
+    }
+    if (nextReplay !== liveFingerprints.replay) {
+      renderReplay(view);
+      liveFingerprints.replay = nextReplay;
+    }
   };
 
   window.__cmcRenderQuarter = function (quarter) {
     if (lastDashboard) lastDashboard.quarter = quarter;
     renderQuarterData(quarter);
+    liveFingerprints.quarter = quarterFingerprint({ quarter: quarter });
   };
 
   document.addEventListener('click', function (event) {
@@ -1004,6 +1247,14 @@
     var name = action.getAttribute('data-cmc-action');
     if (name === 'editor' && typeof window.__cmcOpenSelectedSessionInEditor === 'function') window.__cmcOpenSelectedSessionInEditor();
     if (name === 'inspector' && lastDashboard && lastDashboard.sessions && lastDashboard.sessions.selected) openInspector(lastDashboard.sessions.selected, action);
+    if (name === 'quarter-details' && lastDashboard && lastDashboard.sessions && lastDashboard.sessions.selected) {
+      openSectorInspector(lastDashboard.sessions.selected, {
+        category: action.getAttribute('data-sector-category') || '',
+        title: action.getAttribute('data-sector-title') || '',
+        count: Number(action.getAttribute('data-sector-count') || 0),
+        color: action.getAttribute('data-sector-color') || '',
+      }, action);
+    }
     if (name === 'replay-toggle' && typeof window.__cmcToggleReplayPause === 'function') window.__cmcToggleReplayPause();
     if (name === 'replay-live' && typeof window.__cmcJumpReplayToLive === 'function') window.__cmcJumpReplayToLive();
     if (name === 'replay-seek' && typeof window.__cmcSeekReplayRatio === 'function') {

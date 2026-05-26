@@ -173,6 +173,19 @@
       color: #334155;
       border-color: #cbd5e1;
     }
+    #reset-btn {
+      height: 24px;
+      padding: 0 10px;
+      border-color: rgba(96, 255, 154, 0.35);
+      color: #b8ffcf;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      font-size: 11px;
+    }
+    body.theme-light #reset-btn {
+      border-color: #93c5fd;
+      color: #1d4ed8;
+    }
     @media (max-width: 1280px) {
       #topbar {
         gap: 8px;
@@ -265,6 +278,17 @@
       color: #ffd54a;
       font-size: 18px;
       letter-spacing: 0.02em;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .inspector-title-swatch {
+      width: 12px;
+      height: 12px;
+      border-radius: 999px;
+      background: var(--swatch, #ffd54a);
+      box-shadow: 0 0 12px color-mix(in srgb, var(--swatch, #ffd54a) 65%, transparent);
+      flex: 0 0 auto;
     }
     body.theme-light .inspector-title { color: #1e3a5f; }
     .inspector-subtitle {
@@ -294,6 +318,10 @@
       flex-wrap: wrap;
       gap: 8px;
       align-items: center;
+    }
+    .inspector-toolbar[hidden],
+    .inspector-tabs[hidden] {
+      display: none;
     }
     .inspector-tabs {
       display: flex;
@@ -851,6 +879,11 @@
     }
     .cmc-quarter-line { font-size: 12px; line-height: 1.55; margin: 0; }
     .cmc-quarter-tools { font-size: 11px; line-height: 1.45; margin-top: 2px; }
+    .cmc-quarter-actions {
+      margin-top: auto;
+      padding-top: 8px;
+      margin-bottom: 0;
+    }
     #dom-quarter {
       border-color: color-mix(in srgb, var(--quarter-color, #ffd54a) 60%, rgba(28, 39, 80, 0.9));
       box-shadow:
@@ -872,15 +905,34 @@
       grid-template-columns: 38px 1fr 86px;
       gap: 14px;
       align-items: center;
-      padding: 8px 14px;
+      padding: 0 14px;
       box-sizing: border-box;
     }
-    .cmc-replay-track { position: relative; height: 22px; cursor: pointer; outline: none; }
+    #dom-replay .cmc-button {
+      height: 32px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding-top: 0;
+      padding-bottom: 0;
+      line-height: 1;
+    }
+    #dom-replay [data-cmc-action="replay-toggle"] {
+      width: 38px;
+      padding-left: 0;
+      padding-right: 0;
+    }
+    #dom-replay [data-cmc-action="replay-live"] {
+      width: 86px;
+      padding-left: 0;
+      padding-right: 0;
+    }
+    .cmc-replay-track { position: relative; height: 32px; cursor: pointer; outline: none; }
     .cmc-replay-track:focus-visible { box-shadow: 0 0 0 2px #ffd54a; border-radius: 8px; }
-    .cmc-replay-rail { position: absolute; left: 0; right: 0; top: 6px; height: 10px; border-radius: 999px; background: #1a2448; overflow: hidden; }
+    .cmc-replay-rail { position: absolute; left: 0; right: 0; top: 50%; height: 10px; border-radius: 999px; background: #1a2448; overflow: hidden; transform: translateY(-50%); }
     .cmc-replay-fill { height: 100%; border-radius: 999px; background: #60ff9a; width: 0%; }
-    .cmc-replay-knob { position: absolute; top: -1px; width: 8px; height: 24px; background: #60ff9a; transform: translateX(-4px); }
-    .cmc-replay-status { position: absolute; left: 0; bottom: -10px; font-size: 9px; color: #60ff9a; }
+    .cmc-replay-knob { position: absolute; top: 50%; width: 8px; height: 24px; background: #60ff9a; transform: translate(-4px, -50%); }
+    .cmc-replay-status { position: absolute; left: 0; top: calc(50% + 9px); font-size: 9px; line-height: 1; color: #60ff9a; }
     body.theme-light .cmc-replay-rail { background: #dbe4ef; }
     body.theme-light .cmc-replay-fill,
     body.theme-light .cmc-replay-knob { background: #2563eb; }
@@ -892,6 +944,7 @@
     <span class="brand">Copilot Mission Control</span>
     <span id="topbar-controls">
       <span id="model-chip" class="empty" title="Active model for the selected session"></span>
+      <button id="reset-btn" type="button" title="Reset visible activity counters without deleting Copilot session files" aria-label="Reset visible activity counters">Reset</button>
       <button id="panels-btn" type="button" title="Hide side panels for focus mode" aria-label="Hide side panels for focus mode"></button>
       <button id="theme-btn" type="button" title="Toggle light/dark theme" aria-label="Switch to light theme">🌙</button>
     </span>

@@ -9,6 +9,7 @@ test.describe('Copilot Mission Control app shell', () => {
 
   test('top bar shows brand and theme toggle', async ({ page }) => {
     await expect(page.locator('#topbar .brand')).toContainText('Copilot Mission Control');
+    await expect(page.locator('#reset-btn')).toBeVisible();
     await expect(page.locator('#theme-btn')).toBeVisible();
   });
 

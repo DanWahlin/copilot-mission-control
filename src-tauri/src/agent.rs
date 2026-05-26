@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{env, fs};
@@ -28,7 +28,7 @@ use tauri::{AppHandle, Manager};
 
 // ── Public types serialized to the renderer ───────────────────────────
 
-#[derive(serde::Serialize, Default)]
+#[derive(serde::Serialize, Default, Clone)]
 pub struct AgentActivity {
     pub available: bool,
     pub source: String,
@@ -307,6 +307,7 @@ pub fn default_providers() -> Vec<Box<dyn AgentProvider>> {
 const MAX_SESSIONS: usize = 12;
 const MAX_TOOLS: usize = 10;
 const MAX_TOOLS_PER_CATEGORY: usize = 5;
+const ACTIVITY_CACHE_MAX_AGE_MS: u64 = 2_000;
 /// Recent global event feed cap (after merging across providers). Bumped
 /// from 18 → 80 so chatty bursts between scans don't drop events that
 /// the renderer's workMixHistory needs to accumulate per category.
@@ -333,6 +334,8 @@ const REMOTE_COPILOT_SCHEMA_INDEX_URL: &str =
     "https://danwahlin.github.io/copilot-mission-control/provider-schemas/copilot/index.json";
 const SCHEMA_FETCH_TIMEOUT_SECS: u64 = 2;
 static COPILOT_SCHEMA: OnceLock<(ProviderSchema, Vec<String>)> = OnceLock::new();
+static ACTIVITY_CACHE: OnceLock<RwLock<AgentActivity>> = OnceLock::new();
+static ACTIVITY_REFRESH_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(serde::Deserialize, Clone)]
 struct ProviderSchema {
@@ -965,10 +968,72 @@ fn first_existing_child(parent: &Path, names: &[String]) -> PathBuf {
         .unwrap_or_else(|| parent.join(&names[0]))
 }
 
-pub fn collect_agent_activity() -> AgentActivity {
+fn activity_cache() -> &'static RwLock<AgentActivity> {
+    ACTIVITY_CACHE.get_or_init(|| RwLock::new(AgentActivity::default()))
+}
+
+fn activity_refresh_lock() -> &'static Mutex<()> {
+    ACTIVITY_REFRESH_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn scan_agent_activity() -> AgentActivity {
     let providers = default_providers();
     let scans: Vec<ProviderScan> = providers.iter().map(|p| p.scan()).collect();
     merge_scans(scans)
+}
+
+fn cached_agent_activity_snapshot() -> Option<AgentActivity> {
+    match activity_cache().read() {
+        Ok(cached) if cached.generated_at_ms > 0 => Some(cached.clone()),
+        Ok(_) => None,
+        Err(err) => {
+            log::warn!("Agent activity cache lock poisoned during read: {}", err);
+            None
+        }
+    }
+}
+
+fn scan_and_store_agent_activity() -> AgentActivity {
+    let activity = scan_agent_activity();
+    match activity_cache().write() {
+        Ok(mut cached) => {
+            *cached = activity.clone();
+        }
+        Err(err) => {
+            log::warn!("Agent activity cache lock poisoned during refresh: {}", err);
+        }
+    }
+    activity
+}
+
+pub fn refresh_agent_activity_cache() -> AgentActivity {
+    match activity_refresh_lock().lock() {
+        Ok(_guard) => scan_and_store_agent_activity(),
+        Err(err) => {
+            log::warn!("Agent activity refresh lock poisoned: {}", err);
+            cached_agent_activity_snapshot().unwrap_or_else(scan_agent_activity)
+        }
+    }
+}
+
+pub fn collect_agent_activity() -> AgentActivity {
+    let now = unix_ms(SystemTime::now());
+    match activity_cache().read() {
+        Ok(cached)
+            if cached.generated_at_ms > 0
+                && now.saturating_sub(cached.generated_at_ms) < ACTIVITY_CACHE_MAX_AGE_MS =>
+        {
+            return cached.clone();
+        }
+        Ok(_) => {}
+        Err(err) => {
+            log::warn!("Agent activity cache lock poisoned during read: {}", err);
+        }
+    }
+    match activity_refresh_lock().try_lock() {
+        Ok(_guard) => scan_and_store_agent_activity(),
+        Err(_) => cached_agent_activity_snapshot().unwrap_or_default(),
+    }
 }
 
 fn merge_scans(scans: Vec<ProviderScan>) -> AgentActivity {
@@ -2917,6 +2982,7 @@ pub fn start_watcher(app: AppHandle) {
             let app_clone = app.clone();
             thread::spawn(move || {
                 thread::sleep(Duration::from_millis(300));
+                refresh_agent_activity_cache();
                 pending_clone.store(false, Ordering::SeqCst);
                 if let Some(win) = app_clone.get_webview_window("main") {
                     let _ = win.eval(

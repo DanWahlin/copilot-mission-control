@@ -213,22 +213,22 @@
     {
       "filename": "ship_fighter_blue",
       "frame": {
-        "x": 544,
-        "y": 149,
-        "w": 237,
-        "h": 161
+        "x": 560,
+        "y": 151,
+        "w": 221,
+        "h": 159
       },
       "rotated": false,
       "trimmed": false,
       "spriteSourceSize": {
         "x": 0,
         "y": 0,
-        "w": 237,
-        "h": 161
+        "w": 221,
+        "h": 159
       },
       "sourceSize": {
-        "w": 237,
-        "h": 161
+        "w": 221,
+        "h": 159
       }
     },
     {

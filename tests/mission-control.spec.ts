@@ -73,8 +73,14 @@ async function getMissionState(page: Page) {
       activeSessions: scene.activity?.active_sessions,
       toolCalls: scene.activity?.total_tool_calls,
       sessionCount: scene.activity?.sessions?.length ?? 0,
+      sessions: scene.activity?.sessions ?? [],
       quarterCount: scene.quarters?.length ?? 0,
       selectedSessionId: scene.selectedSession?.id,
+      selectedInputTokens: scene.selectedSession?.input_tokens ?? 0,
+      selectedOutputTokens: scene.selectedSession?.output_tokens ?? 0,
+      selectedToolCount: scene.selectedSession?.tool_count ?? 0,
+      eventLogLength: scene.eventLog?.length ?? 0,
+      activityResetAtMs: scene.activityResetAtMs ?? null,
       sessionPickerRows: scene.sessionPickerRows ?? [],
       activeEventPulseCount: scene.activeEventPulseCount ?? 0,
       quarterEventBadges: scene.quarterEventBadges ?? {},
@@ -127,6 +133,19 @@ async function getMissionState(page: Page) {
       hoveredQuarterIndex: scene.hoveredQuarterIndex ?? -1,
     };
   });
+}
+
+async function openQuarterDetails(page: Page, key: string) {
+  const state = await getMissionState(page);
+  const quarter = state!.quarterRects.find((d: any) => d.key === key);
+  expect(quarter).toBeTruthy();
+  const off = await canvasOffset(page);
+  await page.mouse.move(off.x + quarter.x, off.y + quarter.y);
+  await expect.poll(async () => (await getMissionState(page))!.inspectedQuarterKey).toBe(key);
+  const button = page.locator('#dom-quarter [data-cmc-action="quarter-details"]');
+  await expect(button).toBeVisible();
+  await button.click();
+  await expect(page.locator('#inspector-overlay')).toHaveClass(/visible/);
 }
 
 function expectNoQuarterFrameOverlaps(rects: Array<{ key: string; left: number; right: number; top: number; bottom: number }>) {
@@ -366,6 +385,66 @@ test.describe('Copilot Mission Control — Dashboard', () => {
     expect(sectorText).not.toContain('Selected:');
   });
 
+  test('reset button clears visible counters and keeps old file data hidden after refresh', async ({ page }) => {
+    await expect(page.locator('#reset-btn')).toBeVisible();
+    await page.locator('#reset-btn').click();
+
+    await expect.poll(async () => {
+      const state = await getMissionState(page);
+      return {
+        reset: state!.activityResetAtMs !== null,
+        tokens: [state!.selectedInputTokens, state!.selectedOutputTokens],
+        total: state!.replayState.total,
+        forge: state!.quarterCounts.forge,
+        library: state!.quarterCounts.library,
+      };
+    }).toEqual({
+      reset: true,
+      tokens: [0, 0],
+      total: 0,
+      forge: 0,
+      library: 0,
+    });
+
+    await page.evaluate(() => {
+      const fixture = (window as any).__missionControlFixture;
+      const beta = fixture.sessions.find((session: any) => session.id === 'beta4567');
+      const oldTimestamp = '2026-05-21T07:16:00Z';
+      const newTimestamp = new Date(Date.now() + 1000).toISOString();
+      beta.input_tokens = 1450;
+      beta.output_tokens = 3220;
+      beta.recent_tool_calls = [
+        { tool: 'view', category: 'library', timestamp: oldTimestamp, success: true, call_id: 'old-view' },
+        { tool: 'apply_patch', category: 'forge', timestamp: newTimestamp, success: true, call_id: 'new-patch' },
+      ];
+      beta.token_checkpoints = [
+        { timestamp: oldTimestamp, input_tokens: 1300, output_tokens: 3000 },
+        { timestamp: newTimestamp, input_tokens: 1450, output_tokens: 3220 },
+      ];
+      fixture.recent_events = [
+        { session_id: 'beta4567', timestamp: newTimestamp, kind: 'tool.execution_start', tool: 'apply_patch', category: 'forge', success: true },
+        { session_id: 'beta4567', timestamp: oldTimestamp, kind: 'tool.execution_start', tool: 'view', category: 'library', success: true },
+        ...fixture.recent_events,
+      ];
+      window.__cmcOnAgentActivityChanged?.();
+    });
+
+    await expect.poll(async () => {
+      const state = await getMissionState(page);
+      return {
+        tokens: [state!.selectedInputTokens, state!.selectedOutputTokens],
+        total: state!.replayState.total,
+        forge: state!.quarterCounts.forge,
+        library: state!.quarterCounts.library,
+      };
+    }).toEqual({
+      tokens: [250, 300],
+      total: 1,
+      forge: 1,
+      library: 0,
+    });
+  });
+
   test('selected session summary uses recent meaningful tool activity', async ({ page }) => {
     const fixture = JSON.parse(JSON.stringify(MISSION_FIXTURE));
     const beta = fixture.sessions.find((session: any) => session.id === 'beta4567');
@@ -491,6 +570,66 @@ test.describe('Copilot Mission Control — Dashboard', () => {
     await expect(page.locator('#dom-feed')).toContainText('postToolUse hook started');
   });
 
+  test('live pushes update sector details while pulse animation is active', async ({ page }) => {
+    await page.waitForTimeout(800);
+    const state = await getMissionState(page);
+    const hooks = state!.quarterRects.find((d: any) => d.key === 'hooks');
+    expect(hooks).toBeTruthy();
+    const off = await canvasOffset(page);
+    await page.mouse.move(off.x + hooks!.x, off.y + hooks!.y);
+    await expect.poll(async () => (await getMissionState(page))!.inspectedQuarterKey).toBe('hooks');
+    await expect(page.locator('#dom-quarter')).toContainText('2 selected-session hooks signals');
+
+    await page.evaluate(() => {
+      const scene = (window as any).__phaserGame.scene.getScene('mission-control') as any;
+      const original = scene.renderActivity.bind(scene);
+      scene.__testRenderActivityCount = 0;
+      scene.renderActivity = function (...args: any[]) {
+        scene.__testRenderActivityCount++;
+        return original(...args);
+      };
+    });
+    await page.evaluate(() => {
+      const fixture = (window as any).__missionControlFixture;
+      const beta = fixture.sessions.find((session: any) => session.id === 'beta4567');
+      const hookEvents = Array.from({ length: 4 }, (_, i) => ({
+        session_id: 'beta4567',
+        timestamp: new Date(Date.now() + i).toISOString(),
+        kind: 'hook.start',
+        tool: 'postToolUse',
+        category: 'hooks',
+        success: true,
+      }));
+      beta.hooks_count += hookEvents.length;
+      beta.tool_count += hookEvents.length;
+      beta.event_count += hookEvents.length;
+      fixture.total_tool_calls += hookEvents.length;
+      fixture.total_events += hookEvents.length;
+      fixture.recent_events = [...hookEvents, ...fixture.recent_events];
+      (window as any).__cmcOnAgentActivityChanged?.();
+    });
+
+    await expect.poll(async () => {
+      const mid = await getMissionState(page);
+      return {
+        active: mid!.activeEventPulseCount > 0,
+        hooks: mid!.quarterCounts.hooks,
+      };
+    }).toEqual({ active: true, hooks: 6 });
+    await expect(page.locator('#dom-quarter')).toContainText('6 selected-session hooks signals');
+
+    await page.waitForTimeout(1000);
+    const renderStats = await page.evaluate(() => {
+      const scene = (window as any).__phaserGame.scene.getScene('mission-control') as any;
+      return {
+        active: scene.activeEventPulseCount > 0,
+        fullRenders: scene.__testRenderActivityCount,
+      };
+    });
+    expect(renderStats.active).toBe(true);
+    expect(renderStats.fullRenders).toBe(0);
+  });
+
   test('replay timeline ingests events into the log and stays live by default', async ({ page }) => {
     const state = await getMissionState(page);
     expect(state!.replayState.total).toBe(4);
@@ -501,6 +640,36 @@ test.describe('Copilot Mission Control — Dashboard', () => {
     await expect(page.locator('#dom-replay [data-cmc-action="replay-seek"]')).toBeVisible();
     await expect(page.locator('#dom-feed .cmc-panel-title')).toHaveText('Recent Activity Feed');
     await expect(page.locator('#dom-replay .cmc-replay-status')).toContainText('Recent activity replay');
+  });
+
+  test('replay controls align with the timeline rail', async ({ page }) => {
+    const metrics = await page.evaluate(() => {
+      const rect = (selector: string) => {
+        const el = document.querySelector(selector) as HTMLElement | null;
+        if (!el) throw new Error(`missing ${selector}`);
+        const r = el.getBoundingClientRect();
+        return {
+          top: r.top,
+          bottom: r.bottom,
+          height: r.height,
+          center: (r.top + r.bottom) / 2,
+        };
+      };
+      return {
+        panel: rect('#dom-replay'),
+        toggle: rect('#dom-replay [data-cmc-action="replay-toggle"]'),
+        live: rect('#dom-replay [data-cmc-action="replay-live"]'),
+        rail: rect('#dom-replay .cmc-replay-rail'),
+        status: rect('#dom-replay .cmc-replay-status'),
+      };
+    });
+
+    expect(Math.abs(metrics.toggle.height - metrics.live.height)).toBeLessThanOrEqual(0.5);
+    expect(Math.abs(metrics.toggle.center - metrics.rail.center)).toBeLessThanOrEqual(0.5);
+    expect(Math.abs(metrics.live.center - metrics.rail.center)).toBeLessThanOrEqual(0.5);
+    expect(Math.abs(metrics.panel.center - metrics.rail.center)).toBeLessThanOrEqual(0.5);
+    expect(metrics.status.top).toBeGreaterThan(metrics.rail.bottom);
+    expect(metrics.status.bottom).toBeLessThanOrEqual(metrics.panel.bottom);
   });
 
   test('clicking pause freezes replay; clicking live resumes', async ({ page }) => {
@@ -695,6 +864,31 @@ test.describe('Copilot Mission Control — Dashboard', () => {
     await expect(page.locator('#inspector-dialog')).toContainText('SECRET_AGENT_OUTPUT');
   });
 
+  test('inspector hides raw local details action when no local details are retained', async ({ page }) => {
+    await page.addInitScript((fixture) => {
+      (window as any).__missionControlFixture = fixture;
+      (window as any).__TAURI_INTERNALS__ = {
+        invoke: async (command: string) => {
+          if (command !== 'get_raw_tool_call_details') throw new Error(`unexpected command ${command}`);
+          return {};
+        },
+      };
+    }, inspectorFixture());
+    await page.goto(GAME_URL);
+    await waitForGame(page);
+
+    await page.locator('#dom-session [data-cmc-action="inspector"]').click();
+    await expect(page.locator('#inspector-overlay')).toHaveClass(/visible/);
+    await page.locator('[data-inspector-tab="mcp"]').click();
+    await expect(page.locator('[data-inspector-reveal]')).toBeVisible();
+
+    await page.locator('[data-inspector-reveal]').click();
+
+    await expect(page.locator('#inspector-dialog')).toContainText('No raw local details were retained for this call.');
+    await expect(page.locator('[data-inspector-reveal]')).toHaveCount(0);
+    await expect(page.locator('#inspector-dialog')).not.toContainText('Refresh raw local details');
+  });
+
   test('inspector turn mode shows turn-by-turn story and related tools', async ({ page }) => {
     await page.addInitScript((fixture) => { (window as any).__missionControlFixture = fixture; }, inspectorFixture());
     await page.goto(GAME_URL);
@@ -712,7 +906,7 @@ test.describe('Copilot Mission Control — Dashboard', () => {
     expect(text).toContain('Tool details');
     expect(text).toContain('MCP tool · 1.0s');
     expect(text).toContain('Sub-agent · failed');
-    expect(text).toContain('Tools in this turn (3)');
+    expect(text).toContain('Retained tool rows (3 of 3)');
     expect(text).toContain('code-reviewer');
 
     await page.locator('[data-turn-id="turn-tail"]').click();
@@ -721,6 +915,85 @@ test.describe('Copilot Mission Control — Dashboard', () => {
     expect(text).toContain('running');
     expect(text).toContain('bash-command-with-a-very-long-safe-label-for-...');
     expect(text).not.toContain(LONG_TOOL_NAME);
+  });
+
+  test('inspector turn mode explains when detailed tool rows are outside the retained window', async ({ page }) => {
+    const fixture = inspectorFixture();
+    const beta = fixture.sessions.find((session: any) => session.id === 'beta4567');
+    beta.recent_tool_calls = beta.recent_tool_calls.filter((call: any) => call.turn_id !== 'turn-a1');
+    await page.addInitScript((fixtureArg) => { (window as any).__missionControlFixture = fixtureArg; }, fixture);
+    await page.goto(GAME_URL);
+    await waitForGame(page);
+
+    await page.locator('#dom-session [data-cmc-action="inspector"]').click();
+    await expect(page.locator('#inspector-overlay')).toHaveClass(/visible/);
+    await page.locator('[data-inspector-mode="turns"]').click();
+    await page.locator('[data-turn-id="turn-a1"]').click();
+
+    const text = await page.locator('#inspector-dialog').innerText();
+    expect(text).toContain('Tools\n3');
+    expect(text).toContain('Ran\nbrowser_navigate, blog-writer, code-reviewer');
+    expect(text).toContain('Retained tool rows (0 of 3)');
+    expect(text).toContain('This turn recorded 3 tools (browser_navigate, blog-writer, code-reviewer), but no detailed rows are in the retained call window.');
+    expect(text).not.toContain('Tools in this turn (0)');
+  });
+
+  test('quarter Details opens a sector-scoped inspector filtered to that category', async ({ page }) => {
+    await page.addInitScript((fixture) => { (window as any).__missionControlFixture = fixture; }, inspectorFixture());
+    await page.goto(GAME_URL);
+    await waitForGame(page);
+
+    await openQuarterDetails(page, 'mcp');
+
+    const text = await page.locator('#inspector-dialog').innerText();
+    expect(text).toContain('MCP details');
+    expect(text).toContain('1 retained rows');
+    expect(text).toContain('4 selected-session signals');
+    expect(text).toContain('browser_navigate');
+    expect(text).toContain('MCP tool');
+    expect(text).not.toContain('blog-writer');
+    expect(text).not.toContain('code-reviewer');
+    await expect(page.locator('.inspector-toolbar')).toBeHidden();
+    await expect(page.locator('#inspector-tabs')).toBeHidden();
+  });
+
+  test('quarter Details explains when sector signals outlive retained rows', async ({ page }) => {
+    const fixture = inspectorFixture();
+    const beta = fixture.sessions.find((session: any) => session.id === 'beta4567');
+    beta.recent_tool_calls = beta.recent_tool_calls.filter((call: any) => call.category !== 'mcp');
+    await page.addInitScript((fixtureArg) => { (window as any).__missionControlFixture = fixtureArg; }, fixture);
+    await page.goto(GAME_URL);
+    await waitForGame(page);
+
+    await openQuarterDetails(page, 'mcp');
+
+    const text = await page.locator('#inspector-dialog').innerText();
+    expect(text).toContain('MCP details');
+    expect(text).toContain('0 retained rows');
+    expect(text).toContain('4 selected-session signals');
+    expect(text).toContain('This sector recorded 4 selected-session signals, but no detailed rows are in the retained call window.');
+    expect(text).not.toContain('browser_navigate');
+  });
+
+  test('normal Inspector resets after closing a sector-scoped dialog', async ({ page }) => {
+    await page.addInitScript((fixture) => { (window as any).__missionControlFixture = fixture; }, inspectorFixture());
+    await page.goto(GAME_URL);
+    await waitForGame(page);
+
+    await openQuarterDetails(page, 'mcp');
+    await page.locator('#inspector-close').click();
+    await expect(page.locator('#inspector-overlay')).not.toHaveClass(/visible/);
+
+    await page.locator('#dom-session [data-cmc-action="inspector"]').click();
+    await expect(page.locator('#inspector-overlay')).toHaveClass(/visible/);
+    await expect(page.locator('.inspector-toolbar')).toBeVisible();
+    await expect(page.locator('#inspector-tabs')).toBeVisible();
+    await expect(page.locator('[data-inspector-tab="all"]')).toHaveClass(/active/);
+
+    const text = await page.locator('#inspector-dialog').innerText();
+    expect(text).toContain('Inspector · Review Tests');
+    expect(text).toContain('blog-writer');
+    expect(text).toContain('code-reviewer');
   });
 
   test('HTML inspector uses native scroll containers for long lists', async ({ page }) => {
