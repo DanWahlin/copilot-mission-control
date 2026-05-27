@@ -73,17 +73,13 @@ jobs:
             src-tauri/target/**/release/bundle/**/*.dmg
             src-tauri/target/**/release/bundle/**/*.exe
             src-tauri/target/**/release/bundle/**/*.msi
-            src-tauri/target/**/release/bundle/**/*.msi.sig
             src-tauri/target/**/release/bundle/**/*.AppImage
             src-tauri/target/**/release/bundle/**/*.deb
-            src-tauri/target/**/release/bundle/**/*.deb.sig
             src-tauri/target/**/release/bundle/**/*.rpm
-            src-tauri/target/**/release/bundle/**/*.rpm.sig
             src-tauri/target/**/release/bundle/**/*.app.tar.gz
             src-tauri/target/**/release/bundle/**/*.app.tar.gz.sig
             src-tauri/target/**/release/bundle/**/*.nsis.zip
             src-tauri/target/**/release/bundle/**/*.nsis.zip.sig
-            src-tauri/target/**/release/bundle/**/*.AppImage.sig
             src-tauri/target/**/release/bundle/**/*.AppImage.tar.gz
             src-tauri/target/**/release/bundle/**/*.AppImage.tar.gz.sig
           if-no-files-found: warn
