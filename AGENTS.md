@@ -79,12 +79,12 @@ The Playwright `webServer` config serves `dist/` over `python3 -m http.server 41
 
 The whole point of the `AgentProvider` trait is making this cheap. To add Claude Code, Codex, or a custom CLI:
 
-1. Implement a `ClaudeCodeProvider` struct in `src-tauri/src/agent.rs` (or its own module) with `id()`, `label()`, `is_available()`, `state_root()`, and `scan() -> ProviderScan`.
+1. Implement a `ClaudeCodeProvider` struct in `src-tauri/src/agent.rs` (or its own module) with `id()`, `label()`, `is_available()`, `state_roots()`, and `scan() -> ProviderScan`.
 2. In `scan()`, walk the provider's local state directory (`~/.claude/projects/<project>/<sid>.jsonl`, `~/.codex/sessions/<id>/`, etc.) and build `AgentSessionSummary` / `AgentToolMetric` / `AgentEventSummary` records. **Allowlist fields** — no raw prompts/args/output/paths/diffs.
 3. Set `provider: "claude"` (or similar) on each summary so the renderer can color/icon-differentiate later.
 4. Add the provider to `default_providers()`.
 
-The watcher automatically attaches to each provider's `state_root()`, the merger handles top-N truncation globally across providers, and the renderer is provider-agnostic.
+The watcher automatically attaches to each provider's `state_roots()`, the merger handles top-N truncation globally across providers, and the renderer is provider-agnostic.
 
 ## Regenerating the README previews
 

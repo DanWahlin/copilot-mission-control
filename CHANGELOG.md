@@ -1,11 +1,17 @@
 # Changelog
 
 All notable changes to Copilot Mission Control.
+## [0.1.4] - 2026-05-27
+
+### 🔧 Refactoring
+
+- Clean up release asset uploads
 ## [0.1.3] - 2026-05-27
 
 ### ⚙️ CI/CD & Build
 
 - Update release install instructions
+- Release v0.1.3
 ## [0.1.2] - 2026-05-27
 
 ### 🚀 Features & Improvements

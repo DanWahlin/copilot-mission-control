@@ -85,14 +85,16 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
     match updater.check().await {
         Ok(Some(update)) => {
             if let Some(win) = app.get_webview_window("main") {
-                let _ = win.eval("window.__cmcUpdateStatus && window.__cmcUpdateStatus('downloading')");
+                let _ =
+                    win.eval("window.__cmcUpdateStatus && window.__cmcUpdateStatus('downloading')");
             }
             if let Err(e) = update.download_and_install(|_, _| {}, || {}).await {
                 UPDATE_IN_PROGRESS.store(false, Ordering::SeqCst);
                 return Err(e.to_string());
             }
             if let Some(win) = app.get_webview_window("main") {
-                let _ = win.eval("window.__cmcUpdateStatus && window.__cmcUpdateStatus('restarting')");
+                let _ =
+                    win.eval("window.__cmcUpdateStatus && window.__cmcUpdateStatus('restarting')");
             }
             app.restart();
         }
@@ -170,7 +172,8 @@ async fn open_in_editor(path: String, scheme: Option<String>) -> Result<(), Stri
 
 #[tauri::command]
 async fn open_external_url(url: String) -> Result<(), String> {
-    let allowed = url.starts_with("https://github.com/DanWahlin/copilot-mission-control/issues/new?")
+    let allowed = url
+        .starts_with("https://github.com/DanWahlin/copilot-mission-control/issues/new?")
         || url == "https://github.com/DanWahlin/copilot-mission-control/releases/latest";
     if !allowed {
         return Err("Refusing unsupported external URL".to_string());

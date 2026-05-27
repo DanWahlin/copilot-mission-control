@@ -1756,6 +1756,9 @@ export class MissionControlScene extends Phaser.Scene {
         replayH: layout.replayH,
       },
       schemaDrift: this.activity.schema_drift ?? [],
+      providerAlerts: (this.activity.alerts ?? []).filter(alert =>
+        /Copilot (?:session )?state|session[- ]state|home folders?|Copilot CLI was not found|Copilot executable/i.test(alert),
+      ).slice(0, 3),
       sessions: {
         header: activeOptions.length > 0 ? `Running sessions (${activeOptions.length})` : 'Recent sessions (none active)',
         rows: this.sessionPickerRows,
@@ -1779,7 +1782,7 @@ export class MissionControlScene extends Phaser.Scene {
           ? total === 0
             ? 'No recent Copilot events found. Start a Copilot CLI session and this mission control will wake up.'
             : 'No Copilot events are visible at this replay position.'
-          : 'Copilot CLI was not detected. Install or run Copilot CLI to populate this mission.',
+          : 'No Copilot activity source was detected. Install or run Copilot CLI to populate this mission.',
       },
       quarter,
       replay: {
@@ -2428,7 +2431,7 @@ function buildOpsSummary(activity: CopilotActivity): OpsSummary {
       'Disconnected',
       'watch',
       'Install or run GitHub Copilot CLI to populate live activity.',
-      'Copilot CLI executable or session state is unavailable.',
+      'No Copilot activity source is currently available.',
     );
   }
 

@@ -502,6 +502,20 @@ test.describe('Copilot Mission Control — Dashboard', () => {
     expect(pillTops).toEqual([...pillTops].sort((a, b) => a - b));
   });
 
+  test('provider scan warnings appear in the selected session panel', async ({ page }) => {
+    const fixture = {
+      ...MISSION_FIXTURE,
+      alerts: [
+        'Could not read home folders in \'Ubuntu\'. Start the WSL distro to enable scanning.',
+      ],
+    };
+    await installFixture(page, fixture);
+    await page.goto(GAME_URL);
+    await waitForGame(page);
+    await expect(page.locator('#dom-session .cmc-provider-alert')).toContainText('home folders in \'Ubuntu\'');
+    await expect(page.locator('#provider-alert-overlay')).toHaveCount(0);
+  });
+
   test('bootstrap suppresses live pulses so historical events do not animate', async ({ page }) => {
     // The 4 events in MISSION_FIXTURE.recent_events are the snapshot
     // history — they were already counted by the backend. Animating

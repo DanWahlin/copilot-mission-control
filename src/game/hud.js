@@ -855,8 +855,14 @@
     if (!body) return;
     var selected = view.sessions && view.sessions.selected;
     var options = (view.sessions && view.sessions.options) || [];
+    var alerts = (view.providerAlerts || []).slice(0, 3);
+    var alertsHtml = alerts.length
+      ? alerts.map(function (alert) {
+          return '<div class="cmc-provider-alert">' + escapeHtml(alert) + '</div>';
+        }).join('')
+      : '';
     if (!options.length) {
-      body.innerHTML = '<div class="cmc-label">No running Copilot sessions found. Start Copilot CLI and this panel will show the active task.</div>';
+      body.innerHTML = alertsHtml + '<div class="cmc-label">No running Copilot sessions found. Start Copilot CLI and this panel will show the active task.</div>';
       return;
     }
     var selectedId = selected && selected.id;
@@ -892,7 +898,7 @@
         + '<button class="cmc-button ' + (tcalls > 0 ? '' : 'disabled') + '" aria-label="Open inspector for selected session" ' + (tcalls > 0 ? 'data-cmc-action="inspector"' : 'disabled aria-disabled="true"') + '>Inspector</button>'
         + '</div>';
     }
-    body.innerHTML = picker + selectedHtml;
+    body.innerHTML = alertsHtml + picker + selectedHtml;
   }
 
   function renderFeed(view) {
@@ -999,6 +1005,7 @@
       activity.last || '',
       activity.tool || '',
       activity.age || '',
+      (view.providerAlerts || []).join('|'),
     ].join('::');
   }
 

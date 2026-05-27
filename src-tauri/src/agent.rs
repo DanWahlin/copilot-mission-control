@@ -292,9 +292,9 @@ pub trait AgentProvider: Send + Sync {
     fn label(&self) -> &'static str;
     #[allow(dead_code)]
     fn is_available(&self) -> bool;
-    /// Directory whose changes should trigger a re-scan. None means the
-    /// provider cannot be watched (e.g. it polls a remote endpoint).
-    fn state_root(&self) -> Option<PathBuf>;
+    /// Directories whose changes should trigger a re-scan. Empty means
+    /// the provider cannot be watched (e.g. it polls a remote endpoint).
+    fn state_roots(&self) -> Vec<PathBuf>;
     fn scan(&self) -> ProviderScan;
 }
 
@@ -960,6 +960,169 @@ fn path_from_home(home: &Path, segments: &[String]) -> PathBuf {
         .fold(home.to_path_buf(), |path, segment| path.join(segment))
 }
 
+#[derive(Clone)]
+struct CopilotStateRoot {
+    path: PathBuf,
+    label: String,
+}
+
+#[derive(Default)]
+struct CopilotRootDiscovery {
+    roots: Vec<CopilotStateRoot>,
+    alerts: Vec<String>,
+}
+
+fn copilot_state_root_for_home(home: &Path, schema: &ProviderSchema) -> PathBuf {
+    path_from_home(home, &schema.state_root)
+}
+
+fn no_session_state_alerts(executable_available: bool) -> Vec<String> {
+    let setup_hint = if executable_available {
+        "Run Copilot CLI in your terminal to create it."
+    } else {
+        "Copilot CLI was not found. Install GitHub Copilot CLI or add the `copilot` command to PATH, then run it once to create session state."
+    };
+    vec![
+        format!("No Copilot session state found yet. {}", setup_hint),
+        session_state_lookup_message().to_string(),
+        copilot_executable_lookup_message().to_string(),
+    ]
+}
+
+#[cfg(target_os = "windows")]
+fn session_state_lookup_message() -> &'static str {
+    r"Session-state locations checked: %USERPROFILE%\.copilot\session-state, \\wsl.localhost\<distro>\home\<user>\.copilot\session-state, and \\wsl$\<distro>\home\<user>\.copilot\session-state."
+}
+
+#[cfg(not(target_os = "windows"))]
+fn session_state_lookup_message() -> &'static str {
+    "Session-state location checked: ~/.copilot/session-state."
+}
+
+#[cfg(target_os = "windows")]
+fn copilot_executable_lookup_message() -> &'static str {
+    r"Copilot executable locations checked: PATH, %APPDATA%\npm, %LOCALAPPDATA%\Programs, and %LOCALAPPDATA%\Microsoft\WinGet\Packages."
+}
+
+#[cfg(target_os = "macos")]
+fn copilot_executable_lookup_message() -> &'static str {
+    "Copilot executable locations checked: PATH, ~/.local/bin, ~/bin, ~/.npm-global/bin, ~/.volta/bin, ~/.yarn/bin, /opt/homebrew/bin, and /usr/local/bin."
+}
+
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+fn copilot_executable_lookup_message() -> &'static str {
+    "Copilot executable locations checked: PATH, ~/.local/bin, ~/bin, ~/.npm-global/bin, ~/.volta/bin, and ~/.yarn/bin."
+}
+
+fn io_error_kind_label(err: &std::io::Error) -> &'static str {
+    match err.kind() {
+        std::io::ErrorKind::PermissionDenied => "permission denied",
+        std::io::ErrorKind::TimedOut => "timed out",
+        std::io::ErrorKind::NotConnected => "not connected",
+        std::io::ErrorKind::Interrupted => "interrupted",
+        std::io::ErrorKind::UnexpectedEof => "incomplete read",
+        _ => "I/O error",
+    }
+}
+
+fn session_state_recovery_hint(label: &str) -> &'static str {
+    if label.starts_with("WSL distro ") {
+        "Check WSL distro status or file permissions."
+    } else {
+        "Check file permissions."
+    }
+}
+
+fn discover_copilot_state_roots(schema: &ProviderSchema) -> CopilotRootDiscovery {
+    let mut discovery = CopilotRootDiscovery::default();
+    if let Some(home) = home_dir() {
+        discovery.roots.push(CopilotStateRoot {
+            path: copilot_state_root_for_home(&home, schema),
+            label: "local".to_string(),
+        });
+    } else {
+        discovery.alerts.push(
+            "Your home folder could not be found, so Copilot session state cannot be scanned."
+                .to_string(),
+        );
+    }
+
+    add_wsl_copilot_state_roots(schema, &mut discovery);
+    dedupe_copilot_state_roots(&mut discovery.roots);
+    discovery
+}
+
+fn dedupe_copilot_state_roots(roots: &mut Vec<CopilotStateRoot>) {
+    let mut seen = HashSet::new();
+    roots.retain(|root| {
+        let key = root.path.to_string_lossy().to_ascii_lowercase();
+        seen.insert(key)
+    });
+}
+
+#[cfg(not(target_os = "windows"))]
+fn add_wsl_copilot_state_roots(_schema: &ProviderSchema, _discovery: &mut CopilotRootDiscovery) {}
+
+#[cfg(target_os = "windows")]
+fn add_wsl_copilot_state_roots(schema: &ProviderSchema, discovery: &mut CopilotRootDiscovery) {
+    let mut seen_distros = HashSet::new();
+    for host in [r"\\wsl.localhost", r"\\wsl$"] {
+        let Ok(distros) = fs::read_dir(host) else {
+            continue;
+        };
+        for distro in distros.filter_map(Result::ok) {
+            let distro_name = distro.file_name().to_string_lossy().to_string();
+            let safe_distro = sanitize_wsl_label(&distro_name);
+            if safe_distro.is_empty() || !seen_distros.insert(safe_distro.to_ascii_lowercase()) {
+                continue;
+            }
+
+            let home_dir = distro.path().join("home");
+            let users = match fs::read_dir(&home_dir) {
+                Ok(users) => users,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => {
+                    discovery.alerts.push(format!(
+                        "Could not read home folders in '{}'. Start the WSL distro to enable scanning.",
+                        safe_distro
+                    ));
+                    continue;
+                }
+            };
+
+            for user_home in users.filter_map(Result::ok).map(|entry| entry.path()) {
+                if !user_home.is_dir() {
+                    continue;
+                }
+                let state_root = copilot_state_root_for_home(&user_home, schema);
+                match fs::metadata(&state_root) {
+                    Ok(metadata) if metadata.is_dir() => {
+                        discovery.roots.push(CopilotStateRoot {
+                            path: state_root,
+                            label: format!("WSL distro '{}'", safe_distro),
+                        });
+                    }
+                    Ok(_) => {}
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(_) => discovery.alerts.push(format!(
+                        "Found Copilot state in '{}' but could not access it. The WSL distro may have stopped.",
+                        safe_distro
+                    )),
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn sanitize_wsl_label(label: &str) -> String {
+    label
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(*c, '.' | '_' | '-'))
+        .take(64)
+        .collect()
+}
+
 fn first_existing_child(parent: &Path, names: &[String]) -> PathBuf {
     names
         .iter()
@@ -1156,7 +1319,7 @@ fn merge_scans(scans: Vec<ProviderScan>) -> AgentActivity {
     if !activity.available {
         activity
             .alerts
-            .push("No supported agent CLI executables were found on PATH.".to_string());
+            .push("No supported agent activity sources are currently available.".to_string());
     }
 
     activity
@@ -1176,9 +1339,13 @@ impl AgentProvider for CopilotProvider {
     fn is_available(&self) -> bool {
         is_copilot_available()
     }
-    fn state_root(&self) -> Option<PathBuf> {
+    fn state_roots(&self) -> Vec<PathBuf> {
         let (schema, _) = load_copilot_schema();
-        home_dir().map(|h| path_from_home(&h, &schema.state_root))
+        discover_copilot_state_roots(&schema)
+            .roots
+            .into_iter()
+            .map(|root| root.path)
+            .collect()
     }
     fn scan(&self) -> ProviderScan {
         scan_copilot()
@@ -1188,56 +1355,101 @@ impl AgentProvider for CopilotProvider {
 fn scan_copilot() -> ProviderScan {
     let provider = "copilot";
     let (schema, schema_alerts) = load_copilot_schema();
-    let available = is_copilot_available();
+    let executable_available = is_copilot_available();
     let mut scan = ProviderScan::unavailable(provider);
-    scan.available = available;
+    scan.available = executable_available;
     scan.alerts.extend(schema_alerts);
 
-    let Some(home) = home_dir() else {
+    let discovery = discover_copilot_state_roots(&schema);
+    scan.alerts.extend(discovery.alerts);
+    if discovery.roots.is_empty() {
         scan.alerts
-            .push("HOME is not available, so Copilot session state cannot be scanned.".to_string());
-        return scan;
-    };
-
-    let state_dir = path_from_home(&home, &schema.state_root);
-    if !state_dir.exists() {
-        scan.alerts
-            .push(format!("No {} directory found yet.", state_dir.display()));
+            .extend(no_session_state_alerts(executable_available));
         return scan;
     }
-
-    let mut session_dirs = match fs::read_dir(&state_dir) {
-        Ok(entries) => entries
-            .filter_map(Result::ok)
-            .filter_map(|entry| {
-                let path = entry.path();
-                if !path.is_dir() {
+    let mut session_dirs = Vec::new();
+    let mut existing_roots = 0usize;
+    let mut readable_roots = 0usize;
+    for root in &discovery.roots {
+        match fs::metadata(&root.path) {
+            Ok(metadata) if metadata.is_dir() => existing_roots += 1,
+            Ok(_) => continue,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => {
+                scan.alerts.push(format!(
+                    "Unable to access {} Copilot session state ({}). {}",
+                    root.label,
+                    io_error_kind_label(&err),
+                    session_state_recovery_hint(&root.label)
+                ));
+                continue;
+            }
+        }
+        let entries = match fs::read_dir(&root.path) {
+            Ok(entries) => {
+                readable_roots += 1;
+                entries
+            }
+            Err(err) => {
+                scan.alerts.push(format!(
+                    "Unable to scan {} Copilot session state ({}). {}",
+                    root.label,
+                    io_error_kind_label(&err),
+                    session_state_recovery_hint(&root.label)
+                ));
+                continue;
+            }
+        };
+        session_dirs.extend(entries.filter_map(Result::ok).filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_dir() {
+                return None;
+            }
+            let session_name = path.file_name().and_then(|name| name.to_str())?.to_string();
+            let events_path = first_existing_child(&path, &schema.session.events_files);
+            let modified = events_path
+                .metadata()
+                .and_then(|m| m.modified())
+                .or_else(|_| entry.metadata().and_then(|m| m.modified()))
+                .unwrap_or(UNIX_EPOCH);
+            // Drop sessions whose event log hasn't changed in the
+            // configured cutoff window. Old session folders never
+            // disappear on disk, so without this filter the picker
+            // ends up dominated by yesterday's work.
+            if let Ok(age) = SystemTime::now().duration_since(modified) {
+                if age.as_secs() > STALE_SESSION_CUTOFF_SECS {
                     return None;
                 }
-                let events_path = first_existing_child(&path, &schema.session.events_files);
-                let modified = events_path
-                    .metadata()
-                    .and_then(|m| m.modified())
-                    .or_else(|_| entry.metadata().and_then(|m| m.modified()))
-                    .unwrap_or(UNIX_EPOCH);
-                // Drop sessions whose event log hasn't changed in the
-                // configured cutoff window. Old session folders never
-                // disappear on disk, so without this filter the picker
-                // ends up dominated by yesterday's work.
-                if let Ok(age) = SystemTime::now().duration_since(modified) {
-                    if age.as_secs() > STALE_SESSION_CUTOFF_SECS {
-                        return None;
-                    }
-                }
-                Some((path, modified))
-            })
-            .collect::<Vec<_>>(),
-        Err(err) => {
-            scan.alerts
-                .push(format!("Unable to scan Copilot session state: {}", err));
-            return scan;
+            }
+            Some((session_name, path, modified))
+        }));
+    }
+    if existing_roots == 0 {
+        scan.alerts
+            .extend(no_session_state_alerts(executable_available));
+        return scan;
+    }
+    if readable_roots == 0 {
+        scan.alerts.push(
+            "Copilot session state was found but could not be read. Check WSL distro status or file permissions."
+                .to_string(),
+        );
+        return scan;
+    }
+    scan.available = scan.available || readable_roots > 0;
+    let mut newest_by_session: BTreeMap<String, (PathBuf, SystemTime)> = BTreeMap::new();
+    for (session_name, path, modified) in session_dirs {
+        let replace = newest_by_session
+            .get(&session_name)
+            .map(|(_, existing_modified)| modified > *existing_modified)
+            .unwrap_or(true);
+        if replace {
+            newest_by_session.insert(session_name, (path, modified));
         }
-    };
+    }
+    let mut session_dirs = newest_by_session
+        .into_values()
+        .collect::<Vec<(PathBuf, SystemTime)>>();
 
     session_dirs.sort_by(|a, b| b.1.cmp(&a.1));
     // Cap per-provider scan effort but leave global truncation to the merger.
@@ -2260,39 +2472,54 @@ fn resolve_copilot_session_dir(
     schema: &ProviderSchema,
     session_id: &str,
 ) -> Result<PathBuf, String> {
-    let home = home_dir().ok_or_else(|| "HOME is not available".to_string())?;
-    let state_dir = path_from_home(&home, &schema.state_root);
-    let canonical_root = state_dir
-        .canonicalize()
-        .map_err(|err| format!("Unable to access Copilot session state: {}", err))?;
-    let matches = fs::read_dir(&canonical_root)
-        .map_err(|err| format!("Unable to scan Copilot session state: {}", err))?
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
+    let discovery = discover_copilot_state_roots(schema);
+    let mut matches = Vec::new();
+    let mut scanned_roots = 0usize;
+    for root in discovery.roots {
+        if !root.path.exists() {
+            continue;
+        }
+        let canonical_root = match root.path.canonicalize() {
+            Ok(path) => path,
+            Err(err) => {
+                log::warn!("Unable to access Copilot session state: {}", err);
+                continue;
+            }
+        };
+        let entries = match fs::read_dir(&canonical_root) {
+            Ok(entries) => {
+                scanned_roots += 1;
+                entries
+            }
+            Err(err) => {
+                log::warn!("Unable to scan Copilot session state: {}", err);
+                continue;
+            }
+        };
+        matches.extend(entries.filter_map(Result::ok).filter_map(|entry| {
             let name = entry.file_name().to_string_lossy().to_string();
             if !name.starts_with(session_id) {
                 return None;
             }
             let path = entry.path();
-            if path.is_dir() {
-                Some(path)
+            if !path.is_dir() {
+                return None;
+            }
+            let canonical = path.canonicalize().ok()?;
+            if canonical.starts_with(&canonical_root) {
+                Some(canonical)
             } else {
                 None
             }
-        })
-        .collect::<Vec<_>>();
+        }));
+    }
+    if scanned_roots == 0 {
+        return Err("Unable to scan local Copilot session state".to_string());
+    }
 
     match matches.len() {
         0 => Err("No matching local session was found".to_string()),
-        1 => {
-            let canonical = matches[0]
-                .canonicalize()
-                .map_err(|err| format!("Unable to access session: {}", err))?;
-            if !canonical.starts_with(&canonical_root) {
-                return Err("Resolved session is outside the Copilot state directory".to_string());
-            }
-            Ok(canonical)
-        }
+        1 => Ok(matches.remove(0)),
         _ => Err(
             "Session id is ambiguous; refresh activity before revealing raw details".to_string(),
         ),
@@ -2912,26 +3139,25 @@ pub fn start_watcher(app: AppHandle) {
     let mut watch_targets: Vec<(PathBuf, RecursiveMode)> = Vec::new();
 
     for provider in providers {
-        let Some(root) = provider.state_root() else {
-            continue;
-        };
-        // Prefer the narrow state_root; fall back to its parent for
-        // creation events if the root doesn't exist yet.
-        if root.exists() {
-            watch_targets.push((root, RecursiveMode::Recursive));
-        } else if let Some(parent) = root.parent() {
-            if parent.exists() {
-                watch_targets.push((parent.to_path_buf(), RecursiveMode::NonRecursive));
-                log::info!(
-                    "Watching {} non-recursively until {} exists",
-                    parent.display(),
-                    root.display()
-                );
-            } else {
-                log::warn!(
-                    "Cannot watch {}: parent does not exist either; relying on poll fallback",
-                    root.display()
-                );
+        for root in provider.state_roots() {
+            // Prefer the narrow state_root; fall back to its parent for
+            // creation events if the root doesn't exist yet.
+            if root.exists() {
+                watch_targets.push((root, RecursiveMode::Recursive));
+            } else if let Some(parent) = root.parent() {
+                if parent.exists() {
+                    watch_targets.push((parent.to_path_buf(), RecursiveMode::NonRecursive));
+                    log::info!(
+                        "Watching {} non-recursively until {} exists",
+                        parent.display(),
+                        root.display()
+                    );
+                } else {
+                    log::warn!(
+                        "Cannot watch {}: parent does not exist either; relying on poll fallback",
+                        root.display()
+                    );
+                }
             }
         }
     }
@@ -3293,6 +3519,20 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&checksum_path);
+    }
+
+    #[test]
+    fn unavailable_merge_alert_reports_activity_source_not_cli_path() {
+        let activity = merge_scans(vec![ProviderScan::unavailable("test")]);
+
+        assert!(activity
+            .alerts
+            .iter()
+            .any(|alert| alert == "No supported agent activity sources are currently available."));
+        assert!(!activity
+            .alerts
+            .iter()
+            .any(|alert| alert.contains("CLI executables")));
     }
 
     /// Build a synthetic `ProviderScan` containing only the supplied
