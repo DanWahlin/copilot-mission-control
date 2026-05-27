@@ -27,6 +27,15 @@ test.describe('Copilot Mission Control app shell', () => {
     await expect(page.locator('body')).not.toHaveClass(/theme-light/);
   });
 
+  test('update banner can be shown and dismissed', async ({ page }) => {
+    await expect(page.locator('#update-banner')).not.toBeVisible();
+    await page.evaluate(() => (window as any).__cmcUpdateAvailable('99.0.0'));
+    await expect(page.locator('#update-banner')).toBeVisible();
+    await expect(page.locator('#update-version')).toHaveText('v99.0.0');
+    await page.locator('#update-dismiss').click();
+    await expect(page.locator('#update-banner')).not.toBeVisible();
+  });
+
   test('canvas mounts at full window size', async ({ page }) => {
     const dims = await page.evaluate(() => {
       const game = (window as any).__phaserGame;

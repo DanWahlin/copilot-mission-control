@@ -937,6 +937,66 @@
     body.theme-light .cmc-replay-fill,
     body.theme-light .cmc-replay-knob { background: #2563eb; }
     body.theme-light .cmc-replay-status { color: #1d4ed8; }
+
+    #update-banner {
+      position: fixed;
+      top: 52px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 30;
+      pointer-events: none;
+      background: linear-gradient(180deg, #173922 0%, #0b2111 100%);
+      border: 1px solid rgba(96, 255, 154, 0.65);
+      border-radius: 12px;
+      padding: 10px 18px;
+      color: #d7ffe4;
+      font-size: 13px;
+      box-shadow:
+        0 8px 24px rgba(0, 0, 0, 0.45),
+        0 0 22px rgba(96, 255, 154, 0.22);
+      cursor: pointer;
+      transition: opacity 0.25s ease, transform 0.25s ease, visibility 0.25s ease;
+      opacity: 0;
+      visibility: hidden;
+      white-space: nowrap;
+    }
+    #update-banner.show {
+      opacity: 1;
+      visibility: visible;
+      pointer-events: auto;
+      transform: translateX(-50%) translateY(0);
+    }
+    #update-banner:hover {
+      border-color: #b8ffcf;
+      box-shadow:
+        0 8px 24px rgba(0, 0, 0, 0.5),
+        0 0 28px rgba(96, 255, 154, 0.34);
+    }
+    #update-banner .update-icon { margin-right: 8px; }
+    #update-banner .update-link {
+      color: #60ff9a;
+      font-weight: 700;
+      text-decoration: underline;
+      margin-left: 8px;
+    }
+    #update-banner .update-dismiss {
+      margin-left: 14px;
+      color: rgba(215, 255, 228, 0.55);
+      font-size: 14px;
+      cursor: pointer;
+    }
+    #update-banner .update-dismiss:hover { color: #ffffff; }
+    body.theme-light #update-banner {
+      background: linear-gradient(180deg, #ecfdf3 0%, #dffbea 100%);
+      border-color: #86efac;
+      color: #14532d;
+      box-shadow:
+        0 8px 22px rgba(15, 23, 42, 0.12),
+        0 0 18px rgba(34, 197, 94, 0.18);
+    }
+    body.theme-light #update-banner .update-link { color: #15803d; }
+    body.theme-light #update-banner .update-dismiss { color: rgba(20, 83, 45, 0.55); }
+    body.theme-light #update-banner .update-dismiss:hover { color: #14532d; }
   </style>
 </head>
 <body>
@@ -948,6 +1008,13 @@
       <button id="panels-btn" type="button" title="Hide side panels for focus mode" aria-label="Hide side panels for focus mode"></button>
       <button id="theme-btn" type="button" title="Toggle light/dark theme" aria-label="Switch to light theme">🌙</button>
     </span>
+  </div>
+
+  <div id="update-banner" role="status" aria-live="polite">
+    <span class="update-icon">🚀</span>
+    <span>Version <strong id="update-version"></strong> is available.</span>
+    <span class="update-link">View Release</span>
+    <span class="update-dismiss" id="update-dismiss" title="Dismiss" aria-label="Dismiss update notification">×</span>
   </div>
 
   <div id="game"></div>

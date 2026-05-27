@@ -10,6 +10,7 @@
     "core:window:allow-hide",
     "core:window:allow-minimize",
     "core:event:default",
-    "opener:default"
+    "opener:default",
+    "updater:default"
   ]
 }

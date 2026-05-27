@@ -1379,4 +1379,54 @@
       applyPanelsState();
     }
   }, 100);
+
+  // -------------------------------------------------------------------
+  // Update notification. Rust checks the signed Tauri updater manifest
+  // once per app launch and calls this hook when a newer release exists.
+  // -------------------------------------------------------------------
+
+  window.__cmcUpdateAvailable = function (version) {
+    var banner = $('update-banner');
+    var versionEl = $('update-version');
+    var dismissBtn = $('update-dismiss');
+    var linkEl = banner ? banner.querySelector('.update-link') : null;
+    var iconEl = banner ? banner.querySelector('.update-icon') : null;
+    if (!banner || !versionEl) return;
+
+    versionEl.textContent = 'v' + version;
+    if (linkEl) linkEl.textContent = 'View Release';
+    if (iconEl) iconEl.textContent = '🚀';
+    var autoHideTimer = null;
+
+    banner.onclick = function (event) {
+      if (event.target === dismissBtn) return;
+      openExternalUrl('https://github.com/DanWahlin/copilot-mission-control/releases/latest').catch(function (err) {
+        console.error('Unable to open release URL', err);
+      });
+    };
+
+    if (dismissBtn) {
+      dismissBtn.onclick = function (event) {
+        event.stopPropagation();
+        banner.classList.remove('show');
+        if (autoHideTimer) clearTimeout(autoHideTimer);
+      };
+    }
+
+    setTimeout(function () { banner.classList.add('show'); }, 500);
+    autoHideTimer = setTimeout(function () { banner.classList.remove('show'); }, 30000);
+  };
+
+  window.__cmcUpdateStatus = function (status) {
+    var banner = $('update-banner');
+    var linkEl = banner ? banner.querySelector('.update-link') : null;
+    var iconEl = banner ? banner.querySelector('.update-icon') : null;
+    if (status === 'downloading') {
+      if (linkEl) linkEl.textContent = 'Downloading…';
+      if (iconEl) iconEl.textContent = '📦';
+    } else if (status === 'restarting') {
+      if (linkEl) linkEl.textContent = 'Installing… Restarting';
+      if (iconEl) iconEl.textContent = '✨';
+    }
+  };
 })();

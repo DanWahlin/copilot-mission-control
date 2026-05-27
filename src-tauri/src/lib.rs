@@ -22,6 +22,8 @@ use tauri::{
 };
 use tauri_plugin_window_state::StateFlags;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use agent::{collect_agent_activity, AgentActivity, RawToolCallDetails};
 
 // Icons baked into the binary so they survive whether the binary is
@@ -33,6 +35,8 @@ const TRAY_ICON_BYTES: &[u8] = include_bytes!("../icons/tray_icon.png");
 const DOCK_ICON_BYTES: &[u8] = include_bytes!("../icons/dock_icon.png");
 const MIN_VISIBLE_WINDOW_WIDTH: i64 = 240;
 const MIN_VISIBLE_WINDOW_HEIGHT: i64 = 160;
+static UPDATE_CHECK_DONE: AtomicBool = AtomicBool::new(false);
+static UPDATE_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 /// macOS only: set the running app's Dock icon via NSApplication. Tauri
 /// dev runs the bare binary (no .app bundle), so macOS otherwise falls
@@ -63,6 +67,44 @@ fn set_dock_icon() {
 #[tauri::command]
 fn get_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// Download and install an available update, then restart the app.
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<(), String> {
+    if UPDATE_IN_PROGRESS.swap(true, Ordering::SeqCst) {
+        return Err("Update already in progress".to_string());
+    }
+
+    use tauri_plugin_updater::UpdaterExt;
+    let updater = app.updater_builder().build().map_err(|e| {
+        UPDATE_IN_PROGRESS.store(false, Ordering::SeqCst);
+        e.to_string()
+    })?;
+
+    match updater.check().await {
+        Ok(Some(update)) => {
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.eval("window.__cmcUpdateStatus && window.__cmcUpdateStatus('downloading')");
+            }
+            if let Err(e) = update.download_and_install(|_, _| {}, || {}).await {
+                UPDATE_IN_PROGRESS.store(false, Ordering::SeqCst);
+                return Err(e.to_string());
+            }
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.eval("window.__cmcUpdateStatus && window.__cmcUpdateStatus('restarting')");
+            }
+            app.restart();
+        }
+        Ok(None) => {
+            UPDATE_IN_PROGRESS.store(false, Ordering::SeqCst);
+            Err("No update available".to_string())
+        }
+        Err(e) => {
+            UPDATE_IN_PROGRESS.store(false, Ordering::SeqCst);
+            Err(format!("Update check failed: {}", e))
+        }
+    }
 }
 
 /// Quit the application.
@@ -128,13 +170,53 @@ async fn open_in_editor(path: String, scheme: Option<String>) -> Result<(), Stri
 
 #[tauri::command]
 async fn open_external_url(url: String) -> Result<(), String> {
-    if !url.starts_with("https://github.com/DanWahlin/copilot-mission-control/issues/new?") {
+    let allowed = url.starts_with("https://github.com/DanWahlin/copilot-mission-control/issues/new?")
+        || url == "https://github.com/DanWahlin/copilot-mission-control/releases/latest";
+    if !allowed {
         return Err("Refusing unsupported external URL".to_string());
     }
     tauri_plugin_opener::open_url(url, None::<&str>).map_err(|e| e.to_string())
 }
 
 // ── Window helpers ────────────────────────────────────────────────────
+
+fn start_update_check(app: AppHandle) {
+    if UPDATE_CHECK_DONE.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        tauri::async_runtime::spawn(async move {
+            use tauri_plugin_updater::UpdaterExt;
+            let updater = match app.updater_builder().build() {
+                Ok(updater) => updater,
+                Err(e) => {
+                    log::warn!("Failed to build updater: {}", e);
+                    return;
+                }
+            };
+
+            match updater.check().await {
+                Ok(Some(update)) => {
+                    let version: String = update
+                        .version
+                        .chars()
+                        .filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-')
+                        .collect();
+                    if let Some(win) = app.get_webview_window("main") {
+                        let _ = win.eval(&format!(
+                            "window.__cmcUpdateAvailable && window.__cmcUpdateAvailable('{}')",
+                            version
+                        ));
+                    }
+                }
+                Ok(None) => log::info!("App is up to date"),
+                Err(e) => log::warn!("Update check failed: {}", e),
+            }
+        });
+    });
+}
 
 fn show_window(app: &AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
@@ -205,6 +287,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_log::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags(StateFlags::POSITION)
@@ -220,6 +303,7 @@ pub fn run() {
             get_agent_activity,
             get_copilot_activity,
             get_raw_tool_call_details,
+            install_update,
             open_in_editor,
             open_external_url
         ])
@@ -237,6 +321,7 @@ pub fn run() {
             if let Some(win) = app.get_webview_window("main") {
                 ensure_window_visible(&win);
             }
+            start_update_check(app.handle().clone());
 
             // Build a minimal system tray with Show/Hide and Quit.
             let is_mac = cfg!(target_os = "macos");

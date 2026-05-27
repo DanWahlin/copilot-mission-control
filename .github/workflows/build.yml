@@ -60,6 +60,8 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           args: ${{ matrix.args }}
 
@@ -71,11 +73,19 @@ jobs:
             src-tauri/target/**/release/bundle/**/*.dmg
             src-tauri/target/**/release/bundle/**/*.exe
             src-tauri/target/**/release/bundle/**/*.msi
+            src-tauri/target/**/release/bundle/**/*.msi.sig
             src-tauri/target/**/release/bundle/**/*.AppImage
             src-tauri/target/**/release/bundle/**/*.deb
+            src-tauri/target/**/release/bundle/**/*.deb.sig
             src-tauri/target/**/release/bundle/**/*.rpm
+            src-tauri/target/**/release/bundle/**/*.rpm.sig
             src-tauri/target/**/release/bundle/**/*.app.tar.gz
+            src-tauri/target/**/release/bundle/**/*.app.tar.gz.sig
             src-tauri/target/**/release/bundle/**/*.nsis.zip
+            src-tauri/target/**/release/bundle/**/*.nsis.zip.sig
+            src-tauri/target/**/release/bundle/**/*.AppImage.sig
+            src-tauri/target/**/release/bundle/**/*.AppImage.tar.gz
+            src-tauri/target/**/release/bundle/**/*.AppImage.tar.gz.sig
           if-no-files-found: warn
 
   release:
@@ -107,11 +117,57 @@ jobs:
       - name: List artifacts
         run: find artifacts -type f | sort
 
+      - name: Generate updater manifest (latest.json)
+        env:
+          MAC_SIG: ''
+          WIN_SIG: ''
+          LINUX_SIG: ''
+          MAC_FILE: ''
+          WIN_FILE: ''
+          LINUX_FILE: ''
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          BASE_URL="https://github.com/DanWahlin/copilot-mission-control/releases/download/${GITHUB_REF_NAME}"
+
+          MAC_SIG=$(find artifacts -name "*.app.tar.gz.sig" -type f -exec cat {} \; -quit 2>/dev/null || echo "")
+          WIN_SIG=$(find artifacts -name "*.nsis.zip.sig" -type f -exec cat {} \; -quit 2>/dev/null || echo "")
+          LINUX_SIG=$(find artifacts -name "*.AppImage.tar.gz.sig" -type f -exec cat {} \; -quit 2>/dev/null || echo "")
+
+          MAC_FILE=$(find artifacts -name "*.app.tar.gz" ! -name "*.sig" -type f -exec basename {} \; 2>/dev/null | head -1)
+          WIN_FILE=$(find artifacts -name "*.nsis.zip" ! -name "*.sig" -type f -exec basename {} \; 2>/dev/null | head -1)
+          LINUX_FILE=$(find artifacts -name "*.AppImage.tar.gz" ! -name "*.sig" -type f -exec basename {} \; 2>/dev/null | head -1)
+
+          export VERSION BASE_URL MAC_SIG WIN_SIG LINUX_SIG MAC_FILE WIN_FILE LINUX_FILE
+          node -e "
+            const { VERSION, BASE_URL, MAC_SIG, WIN_SIG, LINUX_SIG, MAC_FILE, WIN_FILE, LINUX_FILE } = process.env;
+            const p = {};
+            const enc = f => f ? encodeURI(f) : '';
+            if (MAC_SIG && MAC_FILE) {
+              const url = BASE_URL + '/' + enc(MAC_FILE);
+              p['darwin-aarch64'] = { signature: MAC_SIG, url };
+              p['darwin-x86_64'] = { signature: MAC_SIG, url };
+            }
+            if (LINUX_SIG && LINUX_FILE) {
+              p['linux-x86_64'] = { signature: LINUX_SIG, url: BASE_URL + '/' + enc(LINUX_FILE) };
+            }
+            if (WIN_SIG && WIN_FILE) {
+              p['windows-x86_64'] = { signature: WIN_SIG, url: BASE_URL + '/' + enc(WIN_FILE) };
+            }
+            const manifest = {
+              version: VERSION,
+              pub_date: new Date().toISOString(),
+              platforms: p
+            };
+            require('fs').writeFileSync('latest.json', JSON.stringify(manifest, null, 2));
+            console.log(JSON.stringify(manifest, null, 2));
+          "
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             artifacts/**/*
+            latest.json
           draft: false
           prerelease: false
           body: |
