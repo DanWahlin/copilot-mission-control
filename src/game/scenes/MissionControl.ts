@@ -1,149 +1,26 @@
 declare const Phaser: any;
 
 import { W, H } from './viewport.js';
-
-type MissionCategory = 'forge' | 'library' | 'terminal' | 'signal' | 'hooks' | 'delegates' | 'skills' | 'court' | 'mcp' | 'workshop' | 'complete' | 'alert' | 'thinking' | 'waiting' | 'prompt' | 'arrival' | 'activity';
-
-interface CopilotToolMetric {
-  name: string;
-  category: MissionCategory | string;
-  count: number;
-}
-
-interface CopilotEventSummary {
-  session_id: string;
-  timestamp: string;
-  kind: string;
-  tool: string;
-  category: MissionCategory | string;
-  success: boolean;
-  input_tokens?: number;
-  output_tokens?: number;
-}
-
-interface CopilotSessionSummary {
-  id: string;
-  title: string;
-  session_name?: string;
-  repository: string;
-  branch: string;
-  updated_at: string;
-  is_active: boolean;
-  status: 'working' | 'thinking' | 'waiting' | 'needs-attention' | 'idle' | string;
-  event_count: number;
-  tool_count: number;
-  write_count: number;
-  read_count: number;
-  command_count: number;
-  web_count: number;
-  task_count: number;
-  delegates_count?: number;
-  skills_count?: number;
-  court_count?: number;
-  mcp_count?: number;
-  hooks_count?: number;
-  error_count: number;
-  turn_count?: number;
-  output_tokens: number;
-  input_tokens?: number;
-  last_tool: string;
-  last_event_kind?: string;
-  last_event_category?: string;
-  last_event_timestamp?: string;
-  stale_seconds?: number;
-  last_model?: string;
-  git_root?: string;
-  recent_tool_calls?: SessionToolCall[];
-  recent_turns?: SessionTurnSummary[];
-  token_checkpoints?: SessionTokenCheckpoint[];
-  replay_activity?: {
-    last: string;
-    tool: string;
-    age: string;
-  };
-}
-
-interface SessionTokenCheckpoint {
-  timestamp: string;
-  input_tokens: number;
-  output_tokens: number;
-}
+import { buildDashboardView as buildDashboardViewModel, buildQuarterView as buildQuarterViewModel } from './dashboardView.js';
+import { computeMissionLayout, sceneScale as computeSceneScale, sectorTextMetrics } from './missionLayout.js';
+import type { MissionLayout } from './missionLayout.js';
+import { buildOpsSummary, createOpsSummary, errorOrReview } from './opsSignals.js';
+import type { OpsSummary } from './opsSignals.js';
+import { advanceReplayCursor, createReplayViewState, ingestReplayEvents, isReplayAtLive, replayEventKey, seekReplayCursor } from './replayState.js';
+import { findSessionIndexById, pickSelectedSession as resolveSelectedSession, sessionPickerOptions } from './sessionSelection.js';
+import type {
+  CopilotActivity,
+  CopilotEventSummary,
+  CopilotSessionSummary,
+  CopilotToolMetric,
+  MissionCategory,
+  SessionToolCall,
+} from './missionTypes.js';
 
 interface ActivityTokenBaseline {
   input_tokens: number;
   output_tokens: number;
 }
-
-interface SessionToolCall {
-  tool: string;
-  category: string;
-  timestamp: string;
-  success: boolean;
-  completed_at?: string;
-  model?: string;
-  call_id?: string;
-  event_ref?: string;
-  turn_id?: string;
-  target?: string;
-  details?: SafeDetail[];
-  duration_ms?: number;
-}
-
-interface SafeDetail {
-  label: string;
-  value: string;
-}
-
-interface SessionTurnSummary {
-  id: string;
-  started_at: string;
-  ended_at: string;
-  status: 'running' | 'complete' | 'failed' | string;
-  tool_count: number;
-  tools?: string[];
-  failure_count: number;
-  categories: string[];
-  model?: string;
-  output_tokens?: number;
-  partial?: boolean;
-  duration_ms?: number;
-}
-
-interface CopilotActivity {
-  available: boolean;
-  source: string;
-  scanned_sessions: number;
-  active_sessions: number;
-  total_events: number;
-  total_tool_calls: number;
-  total_output_tokens: number;
-  total_input_tokens?: number;
-  total_turns?: number;
-  sessions: CopilotSessionSummary[];
-  tools: CopilotToolMetric[];
-  recent_events: CopilotEventSummary[];
-  alerts: string[];
-  schema_drift?: SchemaDriftReport[];
-  generated_at_ms: number;
-}
-
-interface SchemaDriftReport {
-  provider: string;
-  schema_version: string;
-  severity: string;
-  summary: string;
-  checked_sessions: number;
-  affected_sessions: number;
-  total_events: number;
-  recognized_events: number;
-  tool_starts: number;
-  tool_completes: number;
-  missing_event_type: number;
-  unknown_event_types: Array<{ name: string; count: number }>;
-  hints: string[];
-}
-
-type WorkMixCounts = { read: number; write: number; command: number; web: number; task: number; mcp: number; hooks: number };
 
 interface Quarter {
   key: MissionCategory;
@@ -153,31 +30,6 @@ interface Quarter {
   x: number;
   y: number;
   count: number;
-}
-
-interface MissionLayout {
-  s: number;
-  compact: boolean;
-  leftX: number;
-  opsY: number;
-  opsH: number;
-  topY: number;
-  panelW: number;
-  sessionH: number;
-  replayH: number;
-  replayY: number;
-  bottomH: number;
-  bottomY: number;
-  inspectorX: number;
-  inspectorW: number;
-  centerX: number;
-  centerY: number;
-  hubY: number;
-  radiusX: number;
-  radiusY: number;
-  quarterR: number;
-  quarterSize: number;
-  topLift: number;
 }
 
 interface EventPulse {
@@ -208,15 +60,6 @@ interface ArrivalEffect {
   color: number;
   age: number;
   lifetime: number;
-}
-
-type AttentionLevel = 'ok' | 'watch' | 'review';
-
-interface OpsSummary {
-  mode: string;
-  attention: AttentionLevel;
-  recommendation: string;
-  reason: string;
 }
 
 declare global {
@@ -1229,170 +1072,15 @@ export class MissionControlScene extends Phaser.Scene {
     this.drawQuarters();
   }
 
-  // Single source of truth for the dashboard layout. Computes panel
-  // rects first, then derives the ring radii so quarters never
-  // collide with the side panels or the bottom inspector. This must
-  // run before buildQuarters so sceneScale and rect math agree.
   private computeLayout(): MissionLayout {
-    const s = sceneScale();
-    const compact = W < 1600 || H < 900;
-
-    const leftX = Math.max(20, W * 0.018);
-    // The ops strip moved into the HTML top bar — the canvas now only
-    // needs a small breathing-room margin from the top edge. Keeping
-    // opsY/opsH in the layout shape (opsH=0) so downstream readers and
-    // the well-bounds math stay unchanged.
-    const opsY = Math.max(8, H * 0.012);
-    const opsH = 0;
-    const topY = opsY + opsH + (compact ? 10 : 14);
-
-    const panelW = this.panelsHidden
-      ? 0
-      : compact
-        ? Math.min(360, Math.max(300, W * 0.32))
-        : Math.min(520, Math.max(420, W * 0.3));
-    // The left rail now combines selected-session details, actions, and
-    // the work-mix chart. Give it enough height to avoid a scrollbar in
-    // normal windows; the activity feed below is the scroll-heavy panel.
-    const sessionH = Math.min(compact ? 400 : 440, Math.max(390, H * 0.43));
-
-    // Replay strip is DOM-owned and hidden in focus mode so the sector
-    // panel can drop to the bottom edge and the mission ring picks up
-    // the recovered vertical room.
-    const replayH = this.panelsHidden ? 0 : (compact ? 48 : 56);
-    const replayMargin = Math.max(12, H * 0.016);
-    const replayY = this.panelsHidden ? H : H - replayH - replayMargin;
-
-    // Bottom inspector needs room for wrapped "Also:" detail lines.
-    // Keep it noticeably taller than the old strip and let the ring move
-    // up into the recovered vertical space above it.
-    const bottomH = Math.min(compact ? 172 : 196, Math.max(158, H * 0.18));
-    const replayGap = 8;
-    // In focus mode the inspector hugs the bottom edge directly
-    // (replayMargin only) since the replay strip isn't there to sit
-    // above. Otherwise it floats above the replay strip with replayGap
-    // breathing room.
-    const bottomY = this.panelsHidden
-      ? H - bottomH - replayMargin
-      : replayY - replayGap - bottomH;
-
-    const inspectorGutter = compact ? 20 : 32;
-    const inspectorX = leftX + panelW + inspectorGutter;
-    const inspectorW = Math.max(360, W - inspectorX - leftX);
-
-    // Ring well: between side panels horizontally, between ops strip
-    // bottom and bottom-inspector top vertically (with gutters).
-    const wellGutterX = compact ? 18 : 28;
-    // In focus mode the side panels are gone, so the only things bracketing
-    // the ring vertically are the topbar above and the inspector below.
-    // Tighten the gutters so the ring well grows ~24px vertically; that
-    // grows radiusY, spreads N/S buildings further from the castle, and
-    // also lifts the ring center up a touch (since wellTop moves up).
-    const wellGutterY = this.panelsHidden ? (compact ? 6 : 8) : (compact ? 8 : 12);
-    const wellLeft = leftX + panelW + wellGutterX;
-    const wellRight = W - leftX - wellGutterX;
-    const wellTop = opsY + opsH + wellGutterY;
-    const wellBottom = bottomY - wellGutterY;
-
-    const wellW = Math.max(220, wellRight - wellLeft);
-    const wellH = Math.max(180, wellBottom - wellTop);
-
-    const centerX = wellLeft + wellW / 2;
-
-    // Quarter sprite half-size. Start from the available well, then run
-    // the sector card through the same ring math used for placement.
-    // This matters with 9 sectors: adjacent points are only 40deg apart,
-    // so compact focus-mode windows need smaller cards than the old
-    // 8-sector chord heuristic allowed.
-    const rawRadiusX = wellW / 2;
-    const rawRadiusY = wellH / 2;
-    const minRingRadius = Math.min(rawRadiusX, rawRadiusY);
-    const quarterCap = this.panelsHidden ? 80 : 64;
-    const startingQuarterR = Math.max(32, Math.min(quarterCap * s, minRingRadius * 0.42));
-    const labelBlockH = Math.round(38 * Math.max(s, 0.85));
-    const minQuarterR = 24;
-    const layoutForQuarterR = (candidateR: number) => {
-      const quarterSize = candidateR * 2;
-      const sectorText = sectorTextMetrics(candidateR);
-      // Keep layout in sync with drawQuarters so larger sector text still
-      // fits inside the bracket frame and ring bounds.
-      const labelStackH = sectorText.labelStackH;
-
-      // The top quarter only needs `quarterR` of clearance above its
-      // center, while bottom labels need `labelStackH`. Shift the
-      // geometric center up by half the asymmetry so the sector ring uses
-      // vertical space evenly.
-      const verticalShift = this.panelsHidden
-        ? Math.max(0, (labelStackH - candidateR) / 2)
-        : Math.max(18, (labelStackH - candidateR) / 2 + 12);
-      const centerDownNudge = Math.round(CENTER_RING_DOWN_NUDGE_PX * Math.max(s, 0.85));
-      const focusModeLift = this.panelsHidden ? Math.round(FOCUS_RING_UP_LIFT_PX * Math.max(s, 0.85)) : 0;
-      const centerY = wellTop + wellH / 2 - verticalShift + centerDownNudge - focusModeLift;
-      const horizontalRadius = Math.max(100, rawRadiusX - candidateR);
-      const frameH = quarterSize + labelBlockH;
-      const cardPadding = Math.max(4, Math.round(4 * Math.max(s, 0.85)));
-      const maxCardRadius = Array.from({ length: MISSION_SECTOR_COUNT }, (_, index) => {
-        const angle = -Math.PI / 2 + (Math.PI * 2 * index) / MISSION_SECTOR_COUNT;
-        const cos = Math.cos(angle);
-        const sin = Math.sin(angle);
-        const bounds: number[] = [];
-        if (cos > 0.001) bounds.push((wellRight - cardPadding - candidateR - centerX) / cos);
-        else if (cos < -0.001) bounds.push((centerX - wellLeft - cardPadding - candidateR) / -cos);
-        if (sin < -0.001) bounds.push((centerY - wellTop - cardPadding - candidateR) / -sin);
-        else if (sin > 0.001) bounds.push((wellBottom - cardPadding + candidateR - frameH - centerY) / sin);
-        return Math.min(...bounds);
-      }).reduce((min, value) => Math.min(min, value), Number.POSITIVE_INFINITY);
-      const radius = Math.max(100, Math.min(horizontalRadius, maxCardRadius));
-
-      return {
-        centerY,
-        radiusX: radius,
-        radiusY: radius,
-        quarterR: candidateR,
-        quarterSize,
-        topLift: 0,
-      };
-    };
-    const hasSectorCardOverlap = (candidate: ReturnType<typeof layoutForQuarterR>) => {
-      const frameH = candidate.quarterSize + labelBlockH;
-      const gap = Math.max(4, Math.round(6 * Math.max(s, 0.85)));
-      const rects = Array.from({ length: MISSION_SECTOR_COUNT }, (_, index) => {
-        const angle = -Math.PI / 2 + (Math.PI * 2 * index) / MISSION_SECTOR_COUNT;
-        const x = centerX + Math.cos(angle) * candidate.radiusX;
-        const y = candidate.centerY + Math.sin(angle) * candidate.radiusY;
-        return {
-          left: x - candidate.quarterR,
-          right: x + candidate.quarterR,
-          top: y - candidate.quarterR,
-          bottom: y - candidate.quarterR + frameH,
-        };
-      });
-      for (let i = 0; i < rects.length; i++) {
-        for (let j = i + 1; j < rects.length; j++) {
-          const xOverlap = Math.min(rects[i].right, rects[j].right) - Math.max(rects[i].left, rects[j].left);
-          const yOverlap = Math.min(rects[i].bottom, rects[j].bottom) - Math.max(rects[i].top, rects[j].top);
-          if (xOverlap > -gap && yOverlap > -gap) return true;
-        }
-      }
-      return false;
-    };
-    let fitted = layoutForQuarterR(startingQuarterR);
-    while (fitted.quarterR > minQuarterR && hasSectorCardOverlap(fitted)) {
-      fitted = layoutForQuarterR(Math.max(minQuarterR, fitted.quarterR - 2));
-    }
-    const { centerY, radiusX, radiusY, quarterR, quarterSize, topLift } = fitted;
-    const hubY = centerY + labelBlockH / 2;
-
-    return {
-      s, compact,
-      leftX, opsY, opsH, topY, panelW,
-      sessionH,
-      replayH, replayY,
-      bottomH, bottomY,
-      inspectorX, inspectorW,
-      centerX, centerY, hubY,
-      radiusX, radiusY, quarterR, quarterSize, topLift,
-    };
+    return computeMissionLayout({
+      width: W,
+      height: H,
+      panelsHidden: this.panelsHidden,
+      sectorCount: MISSION_SECTOR_COUNT,
+      centerRingDownNudgePx: CENTER_RING_DOWN_NUDGE_PX,
+      focusRingUpLiftPx: FOCUS_RING_UP_LIFT_PX,
+    });
   }
 
   private buildQuarters(): Quarter[] {
@@ -1769,17 +1457,13 @@ export class MissionControlScene extends Phaser.Scene {
 
   private buildQuarterView() {
     const quarter = this.activeInspectedQuarter();
-    if (!quarter) return null;
-    const quarterStats = this.computeQuarterStats(quarter.key);
-    return {
-      category: quarter.key,
-      color: colorToCss(quarter.color),
-      title: quarter.short,
+    return buildQuarterViewModel(quarter ? {
+      key: quarter.key,
+      short: quarter.short,
+      colorCss: colorToCss(quarter.color),
       count: quarter.count,
-      countLine: `${quarter.count} selected-session ${quarter.short.toLowerCase()} signals`,
-      line: quarterStats.line,
-      toolList: quarterStats.toolList ?? '',
-    };
+      stats: this.computeQuarterStats(quarter.key),
+    } : null);
   }
 
   private publishQuarterView() {
@@ -1810,163 +1494,31 @@ export class MissionControlScene extends Phaser.Scene {
   private buildDashboardView() {
     if (!this.layout) return null;
     const layout = this.layout;
-    const compact = layout.compact;
     const sessionOptions = this.getSessionPickerOptions();
-    const activeOptions = sessionOptions.filter(({ session }) => session.is_active);
-    const pickerOptions = (activeOptions.length > 0 ? activeOptions : sessionOptions.slice(0, 1)).slice(0, 5);
-    this.sessionPickerRows = pickerOptions.map(({ session, index }, i) => ({
-      id: session.id,
-      index,
-      title: session.title || session.id,
-      sessionName: session.session_name || '',
-      repository: session.repository || '',
-      branch: session.branch || '',
-      status: session.status,
-      isActive: session.is_active,
-      selected: index === this.selectedSessionIndex,
-      shortId: session.id.length > 8 ? session.id.slice(0, 8) : session.id,
-      x: layout.leftX + 18,
-      y: layout.topY + 80 + i * 30 - 4,
-      w: layout.panelW - 36,
-      h: 26,
-    }));
-    const feedY = layout.topY + layout.sessionH + (compact ? 14 : 22);
-    const feedH = Math.max(140, layout.bottomY - feedY - 16);
-    const total = this.eventLog.length;
-    const cursor = this.replayCursor;
-    const atLive = this.isAtLive();
-    const visibleLog = this.eventLog.slice(0, cursor);
-    const cursorEvent = visibleLog[visibleLog.length - 1];
-    const cursorTimeMs = eventTimestampMs(cursorEvent?.timestamp);
-    const feedAnchorMs = atLive ? Date.now() : (cursorTimeMs ?? Date.now());
-    const feed = visibleLog
-      .slice(-30)
-      .reverse()
-      .map(event => ({ event, ageS: eventAgeSeconds(event.timestamp, feedAnchorMs) }))
-      .map(({ event, ageS }) => ({
-        label: feedLabel(event),
-        age: atLive
-          ? `${formatAge(ageS)} ago`
-          : ageS === 0 ? 'at cursor' : `${formatAge(ageS)} before`,
-        category: event.category,
-        success: event.success,
-      }));
-    const quarter = this.buildQuarterView();
-    const cursorLabel = cursorEvent ? ` · ${formatEventClock(cursorEvent.timestamp)}` : '';
-    const replayStatus = total === 0
-      ? 'Recent activity replay · waiting for events'
-      : atLive
-        ? `Recent activity replay · ${cursor} / ${total} · live${cursorLabel}`
-        : this.replayPaused
-          ? `Recent activity replay · ${cursor} / ${total} · paused${cursorLabel}`
-          : `Recent activity replay · ${cursor} / ${total} · playing${cursorLabel}`;
-    const selectedSessionView = this.buildSelectedSessionView(
-      this.selectedSession,
-      visibleLog,
-      atLive,
-      cursorTimeMs,
-    );
-    return {
+    const quarter = this.activeInspectedQuarter();
+    const result = buildDashboardViewModel({
       panelsHidden: this.panelsHidden,
-      layout: {
-        leftX: layout.leftX,
-        topY: layout.topY,
-        panelW: layout.panelW,
-        compact: layout.compact,
-        sessionH: layout.sessionH,
-        feedY,
-        feedH,
-        bottomX: layout.inspectorX,
-        bottomY: layout.bottomY,
-        bottomW: layout.inspectorW,
-        bottomH: layout.bottomH,
-        replayX: layout.leftX,
-        replayY: layout.replayY,
-        replayW: W - layout.leftX * 2,
-        replayH: layout.replayH,
-      },
-      schemaDrift: this.activity.schema_drift ?? [],
-      providerAlerts: (this.activity.alerts ?? []).filter(alert =>
-        /Copilot (?:session )?state|session[- ]state|home folders?|Copilot CLI was not found|Copilot executable/i.test(alert),
-      ).slice(0, 3),
-      sessions: {
-        header: activeOptions.length > 0 ? `Running sessions (${activeOptions.length})` : 'Recent sessions (none active)',
-        rows: this.sessionPickerRows,
-        idleCount: Math.max(0, sessionOptions.length - pickerOptions.length),
-        options: sessionOptions.map(({ session, index }) => {
-          return {
-            id: session.id,
-            index,
-            title: session.title || session.id,
-            sessionName: session.session_name || '',
-            repository: session.repository || '',
-            branch: session.branch || '',
-            shortId: session.id.length > 8 ? session.id.slice(0, 8) : session.id,
-            status: session.status,
-            isActive: session.is_active,
-          };
-        }),
-        selected: selectedSessionView,
-      },
-      feed: {
-        title: atLive ? 'Recent Activity Feed' : 'Recent Activity Feed · replay cursor',
-        rows: feed,
-        empty: this.activity.available
-          ? total === 0
-            ? 'No recent Copilot events found. Start a Copilot CLI session and this mission control will wake up.'
-            : 'No Copilot events are visible at this replay position.'
-          : 'No Copilot activity source was detected. Install or run Copilot CLI to populate this mission.',
-      },
-      quarter,
-      replay: {
-        paused: this.replayPaused,
-        atLive,
-        cursor,
-        total,
-        status: replayStatus,
-      },
-    };
-  }
-
-  private buildSelectedSessionView(
-    selected: CopilotSessionSummary | null,
-    visibleLog: CopilotEventSummary[],
-    atLive: boolean,
-    cursorTimeMs: number | null,
-  ): CopilotSessionSummary | null {
-    if (!selected) return null;
-    if (atLive) return selected;
-
-    const selectedEvents = visibleLog.filter(event => eventBelongsToSession(event, selected.id));
-    const latestEvent = selectedEvents[selectedEvents.length - 1];
-    const tokenEvent = [...selectedEvents]
-      .reverse()
-      .find(event => event.input_tokens !== undefined || event.output_tokens !== undefined);
-    const tokenCheckpoint = latestTokenCheckpoint(selected.token_checkpoints, cursorTimeMs);
-    const inputTokens = tokenCheckpoint?.input_tokens ?? tokenEvent?.input_tokens ?? 0;
-    const outputTokens = tokenCheckpoint?.output_tokens ?? tokenEvent?.output_tokens ?? 0;
-    const replayActivity = latestEvent
-      ? {
-          last: replaySessionLastLabel(latestEvent),
-          tool: latestEvent.tool || 'none',
-          age: replayAgeLabel(latestEvent.timestamp, cursorTimeMs),
-        }
-      : {
-          last: 'No visible activity at cursor',
-          tool: 'none',
-          age: 'not reached',
-        };
-
-    return {
-      ...selected,
-      input_tokens: inputTokens,
-      output_tokens: outputTokens,
-      last_tool: replayActivity.tool,
-      last_event_kind: latestEvent?.kind ?? '',
-      last_event_category: latestEvent?.category,
-      last_event_timestamp: latestEvent?.timestamp ?? '',
-      replay_activity: replayActivity,
-    };
+      layout,
+      viewportWidth: W,
+      activity: this.activity,
+      sessionOptions,
+      selectedSessionIndex: this.selectedSessionIndex,
+      selectedSession: this.selectedSession,
+      eventLog: this.eventLog,
+      replayPaused: this.replayPaused,
+      replayCursor: this.replayCursor,
+      atLive: this.isAtLive(),
+      quarter: quarter ? {
+        key: quarter.key,
+        short: quarter.short,
+        colorCss: colorToCss(quarter.color),
+        count: quarter.count,
+        stats: this.computeQuarterStats(quarter.key),
+      } : null,
+      nowMs: Date.now(),
+    });
+    this.sessionPickerRows = result.sessionPickerRows;
+    return result.view;
   }
 
   private addText(x: number, y: number, text: string, size: number, color: string) {
@@ -2039,18 +1591,20 @@ export class MissionControlScene extends Phaser.Scene {
   }
 
   private ingestActivityEvents(events: CopilotEventSummary[]) {
-    if (events.length === 0) return 0;
-    const wasAtLive = this.isAtLive();
-    const chronological = [...events].reverse();
-    const appended: CopilotEventSummary[] = [];
     const nowMs = performance.now();
-    for (const event of chronological) {
-      if (!this.isAfterReset(event.timestamp)) continue;
-      const key = eventKey(event);
-      if (this.seenEventKeys.has(key)) continue;
-      this.seenEventKeys.add(key);
-      this.eventLog.push(event);
-      appended.push(event);
+    const result = ingestReplayEvents({
+      events,
+      eventLog: this.eventLog,
+      seenEventKeys: this.seenEventKeys,
+      cursor: this.replayCursor,
+      paused: this.replayPaused,
+      maxEvents: this.replayMaxEvents,
+      includeEvent: event => this.isAfterReset(event.timestamp),
+    });
+    this.replayCursor = result.cursor;
+    if (result.appended.length === 0) return 0;
+
+    for (const event of result.appended) {
       // Track rolling histories. The buffer self-trims during render so
       // unbounded growth is impossible. The live entry's key
       // matches the per-session snapshot's dedupe format so
@@ -2074,19 +1628,11 @@ export class MissionControlScene extends Phaser.Scene {
         }
       }
     }
-    if (appended.length === 0) return 0;
 
-    if (this.eventLog.length > this.replayMaxEvents) {
-      const trim = this.eventLog.length - this.replayMaxEvents;
-      const removed = this.eventLog.splice(0, trim);
-      for (const event of removed) this.seenEventKeys.delete(eventKey(event));
-      this.replayCursor = Math.max(0, this.replayCursor - trim);
-    }
-
-    if (wasAtLive && !this.replayPaused && this.bootstrapCompleted) {
+    if (result.wasAtLive && !this.replayPaused && this.bootstrapCompleted) {
       if (this.quarters.length > 0) {
         const latestPulseByQuarter = new Map<MissionCategory, CopilotEventSummary>();
-        for (const event of appended) {
+        for (const event of result.appended) {
           if (event.kind !== 'tool.execution_start' && event.kind !== 'hook.start') continue;
           const quarterKey = quarterKeyForEvent(event);
           if (!quarterKey) continue;
@@ -2096,14 +1642,9 @@ export class MissionControlScene extends Phaser.Scene {
           this.queueEventPulse(event, 'live', i * PULSE_STAGGER_MS);
         });
       }
-      this.replayCursor = this.eventLog.length;
-    } else if (wasAtLive && !this.replayPaused) {
-      // Bootstrap path: still advance the cursor so the user is "at
-      // live" from the start, but skip the pulse animation.
-      this.replayCursor = this.eventLog.length;
     }
     this.updateReplayState();
-    return appended.length;
+    return result.appended.length;
   }
 
   /// Per-frame attention escalation. Fires bell + OS notification when
@@ -2172,16 +1713,11 @@ export class MissionControlScene extends Phaser.Scene {
   }
 
   private isAtLive() {
-    return this.replayCursor >= this.eventLog.length;
+    return isReplayAtLive(this.replayCursor, this.eventLog.length);
   }
 
   private updateReplayState() {
-    this.replayState = {
-      paused: this.replayPaused,
-      cursor: this.replayCursor,
-      total: this.eventLog.length,
-      atLive: this.isAtLive(),
-    };
+    this.replayState = createReplayViewState(this.replayPaused, this.replayCursor, this.eventLog.length);
   }
 
   private queueEventPulse(event: CopilotEventSummary, source: 'live' | 'replay' = 'live', delay = 0) {
@@ -2206,7 +1742,7 @@ export class MissionControlScene extends Phaser.Scene {
     // brackets are darkened for contrast, so the pulse follows.
     const pulseColor = event.success ? quarterTextColor(quarter.color) : 0xff5252;
     this.eventPulses.push({
-      id: `${source}:${eventKey(event)}:${performance.now()}`,
+      id: `${source}:${replayEventKey(event)}:${performance.now()}`,
       quarterKey,
       color: pulseColor,
       edgeColor: event.success ? quarter.color : 0xff8a8a,
@@ -2383,26 +1919,27 @@ export class MissionControlScene extends Phaser.Scene {
   }
 
   private advanceReplay(delta: number) {
-    if (this.replayPaused) return;
-    if (this.isAtLive() || this.quarters.length === 0) return;
-    this.replayPlayTimer += delta;
-    let advanced = false;
-    while (this.replayPlayTimer >= this.replayPlaybackInterval && !this.isAtLive()) {
-      this.replayPlayTimer -= this.replayPlaybackInterval;
-      const event = this.eventLog[this.replayCursor++];
+    if (this.quarters.length === 0) return;
+    const result = advanceReplayCursor({
+      eventLog: this.eventLog,
+      cursor: this.replayCursor,
+      paused: this.replayPaused,
+      playTimer: this.replayPlayTimer,
+      playbackInterval: this.replayPlaybackInterval,
+      delta,
+    });
+    this.replayCursor = result.cursor;
+    this.replayPlayTimer = result.playTimer;
+    for (const event of result.events) {
       this.queueEventPulse(event, 'replay');
-      advanced = true;
     }
-    if (this.isAtLive()) {
-      this.replayPlayTimer = 0;
-    }
-    if (!advanced) return;
+    if (result.events.length === 0) return;
     this.updateReplayState();
     this.publishDashboardView();
   }
 
   public seekReplay(cursor: number) {
-    const clamped = Math.max(0, Math.min(this.eventLog.length, Math.round(cursor)));
+    const clamped = seekReplayCursor(cursor, this.eventLog.length);
     if (clamped === this.replayCursor) return;
     this.replayCursor = clamped;
     this.replayPlayTimer = 0;
@@ -2431,40 +1968,15 @@ export class MissionControlScene extends Phaser.Scene {
   }
 
   private pickSelectedSession() {
-    const sessions = this.activity.sessions;
-    if (sessions.length === 0) return null;
-    const activeSessions = sessions.filter(session => session.is_active);
-    // Honor a sticky id from prefs only when it points at a selectable
-    // current session. If an old inactive session from the same repo is
-    // persisted while new work is active, showing that stale detail card
-    // beside a "Running sessions" picker makes Last/Age/Tokens look
-    // broken.
-    if (this.userSelectedSession) {
-      const prefs = loadMissionPrefs();
-      if (prefs.lastSelectedSessionId) {
-        const idx = sessions.findIndex(s => s.id === prefs.lastSelectedSessionId);
-        if (idx >= 0 && (activeSessions.length === 0 || sessions[idx].is_active)) {
-          this.selectedSessionIndex = idx;
-          return sessions[idx];
-        }
-        if (idx >= 0 && activeSessions.length > 0) {
-          this.userSelectedSession = false;
-        }
-      }
-    }
-    const safeIndex = Math.max(0, Math.min(this.selectedSessionIndex, sessions.length - 1));
-    this.selectedSessionIndex = safeIndex;
-    if (!this.userSelectedSession) {
-      const reviewSession = sessions.find(session => session.is_active && errorOrReview(session));
-      if (reviewSession) {
-        this.selectedSessionIndex = sessions.indexOf(reviewSession);
-        return reviewSession;
-      }
-    }
-    if (sessions[safeIndex]?.is_active || activeSessions.length === 0) return sessions[safeIndex];
-    const active = activeSessions[0];
-    this.selectedSessionIndex = sessions.indexOf(active);
-    return active;
+    const result = resolveSelectedSession({
+      sessions: this.activity.sessions,
+      selectedIndex: this.selectedSessionIndex,
+      userSelectedSession: this.userSelectedSession,
+      preferredSessionId: loadMissionPrefs().lastSelectedSessionId,
+    });
+    this.selectedSessionIndex = result.selectedIndex;
+    this.userSelectedSession = result.userSelectedSession;
+    return result.session;
   }
 
   /// Push the currently-selected session's model id to the navbar
@@ -2484,14 +1996,7 @@ export class MissionControlScene extends Phaser.Scene {
   }
 
   private getSessionPickerOptions() {
-    const indexed = this.activity.sessions.map((session, index) => ({ session, index }));
-    const active = indexed.filter(({ session }) => session.is_active);
-    const options = active.length > 0 ? active : indexed;
-    return options.sort((a, b) => {
-      const aReview = errorOrReview(a.session) ? 1 : 0;
-      const bReview = errorOrReview(b.session) ? 1 : 0;
-      return bReview - aReview || Number(b.session.is_active) - Number(a.session.is_active);
-    });
+    return sessionPickerOptions(this.activity.sessions);
   }
 
   private selectSession(index: number) {
@@ -2503,7 +2008,7 @@ export class MissionControlScene extends Phaser.Scene {
   }
 
   private selectSessionById(id: string) {
-    const index = this.activity.sessions.findIndex(s => s.id === id);
+    const index = findSessionIndexById(this.activity.sessions, id);
     if (index >= 0) this.selectSession(index);
   }
 
@@ -2564,157 +2069,6 @@ function createEmptyActivity(): CopilotActivity {
     alerts: ['Waiting for GitHub Copilot CLI telemetry.'],
     generated_at_ms: Date.now(),
   };
-}
-
-function createOpsSummary(mode: string, attention: AttentionLevel, recommendation: string, reason: string): OpsSummary {
-  return { mode, attention, recommendation, reason };
-}
-
-function buildOpsSummary(activity: CopilotActivity): OpsSummary {
-  if (!activity.available) {
-    return createOpsSummary(
-      'Disconnected',
-      'watch',
-      'Install or run GitHub Copilot CLI to populate live activity.',
-      'No Copilot activity source is currently available.',
-    );
-  }
-
-  // Concrete operational signals first — these matter far more than the
-  // generic mode label because they tell the user whether their agent
-  // is healthy or stuck. Each rule below maps to an actionable signal.
-  const concrete = detectConcreteOpsSignal(activity);
-  if (concrete) return concrete;
-
-  const activeSessions = activity.sessions.filter(session => session.is_active);
-
-  if (activeSessions.length === 0) {
-    return createOpsSummary(
-      'Idle',
-      'ok',
-      'Safe to context-switch · nothing active in the last 10 min.',
-      'No sessions changed in the active window.',
-    );
-  }
-
-  const mix = workMix({ ...activity, sessions: activeSessions });
-  const dominant = dominantWork(mix);
-  const recent = activity.recent_events[0];
-  const sessionList = activeSessions.map(s => s.id).join(', ');
-  if (recent?.category === 'waiting' || recent?.category === 'prompt' || recent?.category === 'arrival') {
-    return createOpsSummary(
-      'Waiting',
-      'watch',
-      `Copilot is waiting on you · ${sessionList}`,
-      `Latest signal is ${recent.category}.`,
-    );
-  }
-
-  if (dominant === 'command') {
-    return createOpsSummary('Validating', 'ok', `Running commands/tests · ${sessionList}`, 'Command/test tools dominate active work.');
-  }
-  if (dominant === 'write') {
-    return createOpsSummary('Editing', 'watch', `Changing files · review diffs · ${sessionList}`, 'Edit tools dominate active work.');
-  }
-  if (dominant === 'read') {
-    return createOpsSummary('Gathering context', 'ok', `Reading source · ${sessionList}`, 'Read/search tools dominate active work.');
-  }
-  if (dominant === 'web') {
-    return createOpsSummary('Researching', 'ok', `Fetching docs/web · ${sessionList}`, 'Web/docs tools dominate active work.');
-  }
-  if (dominant === 'task') {
-    return createOpsSummary('Delegating', 'watch', `Sub-agent active · ${sessionList}`, 'Delegation tools dominate active work.');
-  }
-
-  return createOpsSummary('Working', 'ok', `Active · ${sessionList}`, 'Active session has recent signals.');
-}
-
-/// Inspect the trailing event stream for telltale signs of trouble:
-/// possible hangs (long-running command with no completion), possible
-/// loops (same tool fired many times in a short window), and recent
-/// failures. Returns null when nothing stands out — the caller then
-/// falls back to mode-based messaging.
-function detectConcreteOpsSignal(activity: CopilotActivity): OpsSummary | null {
-  const events = activity.recent_events;
-  const sessions = activity.sessions.filter(s => s.is_active);
-  const activeIds = new Set(sessions.map(s => s.id));
-
-  // 1. Failure tied to an active session. Stale failures from idle
-  // sessions are intentionally ignored so old noise doesn't keep the
-  // dashboard pinned to "Needs review" forever.
-  const erroredActive = sessions.find(s => s.error_count > 0);
-  const lastFailure = events.find(e =>
-    e.kind === 'tool.execution_complete' && !e.success && activeIds.has(e.session_id)
-  );
-  if (erroredActive || lastFailure) {
-    // Identify the failing session by name so the user can locate it in
-    // the Sessions panel without first having to select it. The chip
-    // alone (NEEDS REVIEW) is what conveys severity; the recommendation
-    // text just describes what happened and where.
-    const target = erroredActive
-      ?? sessions.find(s => s.id === lastFailure?.session_id)
-      ?? sessions[0];
-    const tool = target?.last_tool ?? lastFailure?.tool ?? 'tool';
-    const sessionLabel = target ? (target.title || target.id) : 'active session';
-    const ago = typeof target?.stale_seconds === 'number' ? ` ${formatAge(target.stale_seconds)} ago` : '';
-    return createOpsSummary(
-      'Needs review',
-      'review',
-      `${tool} failed${ago} in ${sessionLabel}`,
-      'Active session has one or more tool failures.',
-    );
-  }
-
-  // (Removed: "Long-running" heuristic — too noisy. A tool with no
-  // completion event is often just legitimately slow; surfacing it as
-  // "check if it's hung" recommended action proved unhelpful in
-  // practice.)
-
-  // 3. Possible loop: same tool fired 5+ times in the trailing 10
-  // active-session events.
-  const trailing = events.slice(0, 10).filter(e => activeIds.has(e.session_id));
-  const counts = new Map<string, number>();
-  for (const e of trailing) {
-    if (e.kind === 'tool.execution_start') {
-      counts.set(e.tool, (counts.get(e.tool) ?? 0) + 1);
-    }
-  }
-  const looped = [...counts.entries()].find(([, c]) => c >= 5);
-  if (looped) {
-    return createOpsSummary(
-      'Possible loop',
-      'watch',
-      `${looped[0]} called ${looped[1]}× recently · consider interrupting`,
-      'A single tool name dominates the recent event window.',
-    );
-  }
-
-  return null;
-}
-
-function createEmptyWorkMix(): WorkMixCounts {
-  return { read: 0, write: 0, command: 0, web: 0, task: 0, mcp: 0, hooks: 0 };
-}
-
-function workMix(activity: CopilotActivity): WorkMixCounts {
-  return activity.sessions.reduce(
-    (mix, session) => ({
-      read: mix.read + session.read_count,
-      write: mix.write + session.write_count,
-      command: mix.command + session.command_count,
-      web: mix.web + session.web_count,
-      task: mix.task + session.task_count,
-      mcp: mix.mcp + (session.mcp_count ?? 0),
-      hooks: mix.hooks + (session.hooks_count ?? 0),
-    }),
-    createEmptyWorkMix(),
-  );
-}
-
-function dominantWork(mix: ReturnType<typeof workMix>) {
-  const entries = Object.entries(mix) as [keyof typeof mix, number][];
-  entries.sort((a, b) => b[1] - a[1]);
-  return entries[0]?.[1] > 0 ? entries[0][0] : 'activity';
 }
 
 function createDemoActivity(): CopilotActivity {
@@ -2843,14 +2197,6 @@ function normalizeActivity(activity: CopilotActivity): CopilotActivity {
   };
 }
 
-function errorOrReview(session: CopilotSessionSummary) {
-  return session.status === 'needs-attention' || session.error_count > 0;
-}
-
-function eventKey(event: CopilotEventSummary) {
-  return `${event.timestamp}|${event.session_id}|${event.kind}|${event.tool}|${event.category}|${event.success}`;
-}
-
 function quarterKeyForEvent(event: CopilotEventSummary): MissionCategory | null {
   const category = event.category;
   if (category === 'forge' || category === 'library' || category === 'terminal' || category === 'signal' || category === 'hooks' || category === 'delegates' || category === 'skills' || category === 'court' || category === 'mcp') {
@@ -2894,28 +2240,12 @@ function truncate(text: string, max: number) {
   return text.length > max ? `${text.slice(0, Math.max(0, max - 1))}…` : text;
 }
 
-function clamp(value: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, value));
-}
-
 function snap(value: number) {
   return Math.round(value);
 }
 
 function sceneScale() {
-  return clamp(Math.min(W / 1920, H / 1080) * 1.24, 0.88, 1.45);
-}
-
-function sectorTextMetrics(quarterR: number) {
-  const quarterSize = quarterR * 2;
-  const pedestalUnit = quarterR / 64;
-  const labelSize = Math.max(12, Math.round(quarterSize * 0.115));
-  const countSize = Math.max(16, Math.round(quarterSize * 0.16));
-  return {
-    labelSize,
-    countSize,
-    labelStackH: Math.round(42 * pedestalUnit + 14 + labelSize + countSize),
-  };
+  return computeSceneScale(W, H);
 }
 
 function compactNumber(value: number) {
@@ -2931,85 +2261,6 @@ function compactNumberShort(value: number) {
   if (value >= 1_000_000) return `${Math.round(value / 1_000_000)}m`;
   if (value >= 1_000) return `${Math.round(value / 1_000)}k`;
   return String(value);
-}
-
-function formatAge(seconds?: number) {
-  if (seconds === undefined || Number.isNaN(seconds)) return 'unknown';
-  if (seconds < 60) return `${seconds}s`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
-  return `${Math.floor(seconds / 3600)}h`;
-}
-
-/// Parses the ISO timestamp Rust emits on each `CopilotEventSummary`
-/// and returns the elapsed seconds vs `nowMs`. Falls back to 0 for
-/// malformed timestamps so the feed never crashes on bad input.
-function eventAgeSeconds(timestamp: string, nowMs = Date.now()): number {
-  const t = eventTimestampMs(timestamp);
-  if (t === null) return 0;
-  return Math.max(0, Math.floor((nowMs - t) / 1000));
-}
-
-function eventTimestampMs(timestamp?: string): number | null {
-  const t = Date.parse(timestamp ?? '');
-  return Number.isNaN(t) ? null : t;
-}
-
-function latestTokenCheckpoint(checkpoints: SessionTokenCheckpoint[] | undefined, cursorTimeMs: number | null) {
-  if (!checkpoints?.length || cursorTimeMs === null) return null;
-  let latest: SessionTokenCheckpoint | null = null;
-  for (const checkpoint of checkpoints) {
-    const t = eventTimestampMs(checkpoint.timestamp);
-    if (t === null || t > cursorTimeMs) continue;
-    if (!latest || t >= (eventTimestampMs(latest.timestamp) ?? 0)) {
-      latest = checkpoint;
-    }
-  }
-  return latest;
-}
-
-function formatEventClock(timestamp: string) {
-  const t = eventTimestampMs(timestamp);
-  if (t === null) return 'unknown time';
-  return new Date(t).toLocaleTimeString([], {
-    hour: 'numeric',
-    minute: '2-digit',
-    second: '2-digit',
-  });
-}
-
-function feedLabel(event: CopilotEventSummary) {
-  if (event.kind === 'tool.execution_start') return event.tool || 'tool started';
-  if (event.kind === 'tool.execution_complete') return event.success ? 'tool completed' : 'tool failed';
-  if (event.kind === 'hook.start') return `${event.tool || 'hook'} hook started`;
-  if (event.kind === 'hook.end') return event.success ? `${event.tool || 'hook'} hook completed` : `${event.tool || 'hook'} hook failed`;
-  if (event.kind === 'assistant.turn_start') return 'Copilot started thinking';
-  if (event.kind === 'assistant.turn_end') return 'Copilot is waiting';
-  if (event.kind === 'assistant.message') return 'token update';
-  if (event.kind === 'session.compaction_complete') return 'compaction token checkpoint';
-  if (event.kind === 'session.shutdown') return 'session token checkpoint';
-  if (event.kind === 'user.message') return 'prompt received';
-  if (event.kind === 'session.start') return 'session opened';
-  return event.kind;
-}
-
-function replaySessionLastLabel(event: CopilotEventSummary) {
-  if (event.kind === 'tool.execution_start') return `${event.tool || 'tool'} started`;
-  if (event.kind === 'tool.execution_complete') return event.success ? 'tool completed' : 'tool failed';
-  if (event.kind === 'hook.start') return `${event.tool || 'hook'} hook started`;
-  if (event.kind === 'hook.end') return event.success ? `${event.tool || 'hook'} hook completed` : `${event.tool || 'hook'} hook failed`;
-  return feedLabel(event);
-}
-
-function replayAgeLabel(timestamp: string, cursorTimeMs: number | null) {
-  if (cursorTimeMs === null) return 'at cursor';
-  const ageS = eventAgeSeconds(timestamp, cursorTimeMs);
-  return ageS === 0 ? 'at cursor' : `${formatAge(ageS)} before cursor`;
-}
-
-function eventBelongsToSession(event: CopilotEventSummary, sessionId: string) {
-  return event.session_id === sessionId
-    || sessionId.startsWith(event.session_id)
-    || event.session_id.startsWith(sessionId);
 }
 
 function categoryCountsFromToolCalls(calls: SessionToolCall[]): Record<string, number> {

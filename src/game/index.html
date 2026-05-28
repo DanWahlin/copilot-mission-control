@@ -215,6 +215,7 @@
        scrolling, wrapping, selection, and keyboard close behave like a
        normal desktop UI. */
     #inspector-overlay,
+    #attention-overlay,
     #settings-overlay {
       position: fixed;
       inset: 40px 0 0 0;
@@ -227,6 +228,7 @@
       box-sizing: border-box;
     }
     #inspector-overlay.visible { display: flex; }
+    #attention-overlay.visible { display: flex; }
     #settings-overlay { z-index: 34; }
     #settings-overlay.visible { display: flex; }
     #schema-drift-overlay {
@@ -276,6 +278,28 @@
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
     body.theme-light #schema-drift-dialog {
+      background: #ffffff;
+      color: #1f2937;
+      border-color: #cbd5e1;
+      box-shadow: 0 24px 70px rgba(15, 23, 42, 0.18);
+    }
+    #attention-dialog {
+      width: min(840px, calc(100vw - 56px));
+      max-height: min(680px, calc(100vh - 96px));
+      display: grid;
+      grid-template-rows: auto 1fr;
+      gap: 16px;
+      overflow: hidden;
+      background: #0c1430;
+      color: #e8ecff;
+      border: 2px solid #ffd54a;
+      border-radius: 16px;
+      box-shadow: 0 24px 70px rgba(0, 0, 0, 0.62);
+      padding: 20px;
+      box-sizing: border-box;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    body.theme-light #attention-dialog {
       background: #ffffff;
       color: #1f2937;
       border-color: #cbd5e1;
@@ -949,6 +973,85 @@
       border-color: #f59e0b;
       color: #92400e;
     }
+    .cmc-attention-entry {
+      width: 100%;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      margin: 0 0 8px;
+      padding: 7px 9px;
+      border: 1px solid rgba(96, 255, 154, 0.42);
+      border-radius: 10px;
+      background: rgba(16, 24, 51, 0.62);
+      color: #e8ecff;
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+      box-sizing: border-box;
+    }
+    .cmc-attention-entry.quiet {
+      cursor: default;
+    }
+    .cmc-attention-entry.watch,
+    .cmc-attention-entry.review {
+      border-color: rgba(255, 213, 74, 0.72);
+      background: rgba(255, 213, 74, 0.08);
+    }
+    .cmc-attention-copy {
+      min-width: 0;
+      display: grid;
+      gap: 3px;
+    }
+    .cmc-attention-kicker {
+      color: #93a4d8;
+      font-size: 9px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .cmc-attention-summary {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: #f5f7ff;
+      font-size: 11px;
+    }
+    .cmc-attention-count {
+      min-width: 24px;
+      padding: 4px 7px;
+      border-radius: 999px;
+      background: rgba(96, 255, 154, 0.18);
+      color: #b8ffcf;
+      font-size: 10px;
+      text-align: center;
+    }
+    .cmc-attention-entry.watch .cmc-attention-count,
+    .cmc-attention-entry.review .cmc-attention-count {
+      background: rgba(255, 213, 74, 0.18);
+      color: #ffd54a;
+    }
+    body.theme-light .cmc-attention-entry {
+      background: #ffffff;
+      border-color: #cad5e4;
+      color: #172033;
+    }
+    body.theme-light .cmc-attention-entry.watch,
+    body.theme-light .cmc-attention-entry.review {
+      background: #fffbeb;
+      border-color: #f59e0b;
+    }
+    body.theme-light .cmc-attention-kicker { color: #52627a; }
+    body.theme-light .cmc-attention-summary { color: #172033; }
+    body.theme-light .cmc-attention-count {
+      background: #dcfce7;
+      color: #166534;
+    }
+    body.theme-light .cmc-attention-entry.watch .cmc-attention-count,
+    body.theme-light .cmc-attention-entry.review .cmc-attention-count {
+      background: #fef3c7;
+      color: #92400e;
+    }
     .cmc-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
     .cmc-button {
       border: 1px solid rgba(165, 177, 216, 0.7);
@@ -1080,6 +1183,81 @@
       margin-top: auto;
       padding-top: 8px;
       margin-bottom: 0;
+    }
+    #attention-body {
+      min-height: 0;
+      overflow-y: auto;
+      padding-right: 8px;
+      scrollbar-gutter: stable;
+    }
+    .attention-list {
+      display: grid;
+      gap: 12px;
+    }
+    .attention-item {
+      display: grid;
+      gap: 8px;
+      padding: 12px;
+      border: 1px solid rgba(127, 151, 239, 0.44);
+      border-left: 4px solid var(--attention-color, #ffd54a);
+      border-radius: 12px;
+      background: rgba(16, 24, 51, 0.82);
+    }
+    body.theme-light .attention-item {
+      background: linear-gradient(180deg, #ffffff, #f8fbff);
+      border-color: #cad5e4;
+      border-left-color: var(--attention-color, #b45309);
+    }
+    .attention-item-head {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 12px;
+      align-items: start;
+    }
+    .attention-item-title {
+      color: #f5f7ff;
+      font-size: 13px;
+      line-height: 1.35;
+    }
+    body.theme-light .attention-item-title { color: #172033; }
+    .attention-item-detail {
+      color: #c8d3ff;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    body.theme-light .attention-item-detail { color: #52627a; }
+    .attention-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      justify-content: flex-end;
+    }
+    .attention-tag {
+      border: 1px solid rgba(165, 177, 216, 0.5);
+      border-radius: 999px;
+      padding: 3px 7px;
+      color: #a5b1d8;
+      font-size: 10px;
+      white-space: nowrap;
+    }
+    body.theme-light .attention-tag {
+      border-color: #cad5e4;
+      color: #52627a;
+      background: #ffffff;
+    }
+    .attention-empty {
+      border: 1px solid rgba(96, 255, 154, 0.38);
+      border-radius: 12px;
+      padding: 14px;
+      background: rgba(96, 255, 154, 0.08);
+      color: #b8ffcf;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    body.theme-light .attention-empty {
+      background: #f0fdf4;
+      border-color: #86efac;
+      color: #166534;
     }
     #dom-quarter {
       border-color: color-mix(in srgb, var(--quarter-color, #ffd54a) 60%, rgba(28, 39, 80, 0.9));
@@ -1262,6 +1440,19 @@
       <div class="cmc-actions">
         <button id="settings-done" class="cmc-button accent" type="button">Done</button>
       </div>
+    </div>
+  </section>
+
+  <section id="attention-overlay" aria-hidden="true">
+    <div id="attention-dialog" role="dialog" aria-modal="true" aria-labelledby="attention-title" tabindex="-1">
+      <div class="inspector-header">
+        <div>
+          <h2 id="attention-title" class="inspector-title">Attention Center</h2>
+          <div id="attention-subtitle" class="inspector-subtitle"></div>
+        </div>
+        <button id="attention-close" class="inspector-close" type="button" aria-label="Close Attention Center">×</button>
+      </div>
+      <div id="attention-body"></div>
     </div>
   </section>
 

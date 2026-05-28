@@ -1,0 +1,135 @@
+export type MissionCategory = 'forge' | 'library' | 'terminal' | 'signal' | 'hooks' | 'delegates' | 'skills' | 'court' | 'mcp' | 'workshop' | 'complete' | 'alert' | 'thinking' | 'waiting' | 'prompt' | 'arrival' | 'activity';
+
+export interface CopilotToolMetric {
+  name: string;
+  category: MissionCategory | string;
+  count: number;
+}
+
+export interface CopilotEventSummary {
+  session_id: string;
+  timestamp: string;
+  kind: string;
+  tool: string;
+  category: MissionCategory | string;
+  success: boolean;
+  input_tokens?: number;
+  output_tokens?: number;
+}
+
+export interface CopilotSessionSummary {
+  id: string;
+  title: string;
+  session_name?: string;
+  repository: string;
+  branch: string;
+  updated_at: string;
+  is_active: boolean;
+  status: 'working' | 'thinking' | 'waiting' | 'needs-attention' | 'idle' | string;
+  event_count: number;
+  tool_count: number;
+  write_count: number;
+  read_count: number;
+  command_count: number;
+  web_count: number;
+  task_count: number;
+  delegates_count?: number;
+  skills_count?: number;
+  court_count?: number;
+  mcp_count?: number;
+  hooks_count?: number;
+  error_count: number;
+  turn_count?: number;
+  output_tokens: number;
+  input_tokens?: number;
+  last_tool: string;
+  last_event_kind?: string;
+  last_event_category?: string;
+  last_event_timestamp?: string;
+  stale_seconds?: number;
+  last_model?: string;
+  git_root?: string;
+  recent_tool_calls?: SessionToolCall[];
+  recent_turns?: SessionTurnSummary[];
+  token_checkpoints?: SessionTokenCheckpoint[];
+  replay_activity?: {
+    last: string;
+    tool: string;
+    age: string;
+  };
+}
+
+export interface SessionTokenCheckpoint {
+  timestamp: string;
+  input_tokens: number;
+  output_tokens: number;
+}
+
+export interface SessionToolCall {
+  tool: string;
+  category: string;
+  timestamp: string;
+  success: boolean;
+  completed_at?: string;
+  model?: string;
+  call_id?: string;
+  event_ref?: string;
+  turn_id?: string;
+  target?: string;
+  details?: SafeDetail[];
+  duration_ms?: number;
+}
+
+export interface SafeDetail {
+  label: string;
+  value: string;
+}
+
+export interface SessionTurnSummary {
+  id: string;
+  started_at: string;
+  ended_at: string;
+  status: 'running' | 'complete' | 'failed' | string;
+  tool_count: number;
+  tools?: string[];
+  failure_count: number;
+  categories: string[];
+  model?: string;
+  output_tokens?: number;
+  partial?: boolean;
+  duration_ms?: number;
+}
+
+export interface CopilotActivity {
+  available: boolean;
+  source: string;
+  scanned_sessions: number;
+  active_sessions: number;
+  total_events: number;
+  total_tool_calls: number;
+  total_output_tokens: number;
+  total_input_tokens?: number;
+  total_turns?: number;
+  sessions: CopilotSessionSummary[];
+  tools: CopilotToolMetric[];
+  recent_events: CopilotEventSummary[];
+  alerts: string[];
+  schema_drift?: SchemaDriftReport[];
+  generated_at_ms: number;
+}
+
+export interface SchemaDriftReport {
+  provider: string;
+  schema_version: string;
+  severity: string;
+  summary: string;
+  checked_sessions: number;
+  affected_sessions: number;
+  total_events: number;
+  recognized_events: number;
+  tool_starts: number;
+  tool_completes: number;
+  missing_event_type: number;
+  unknown_event_types: Array<{ name: string; count: number }>;
+  hints: string[];
+}

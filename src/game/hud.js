@@ -787,6 +787,11 @@
   var domReplay = $('dom-replay');
   var domLoading = $('dashboard-loading');
   var domLoadingImage = domLoading ? domLoading.querySelector('img') : null;
+  var attentionOverlay = $('attention-overlay');
+  var attentionDialog = $('attention-dialog');
+  var attentionSubtitle = $('attention-subtitle');
+  var attentionBody = $('attention-body');
+  var attentionClose = $('attention-close');
   var schemaDriftOverlay = $('schema-drift-overlay');
   var schemaDriftSubtitle = $('schema-drift-subtitle');
   var schemaDriftBody = $('schema-drift-body');
@@ -794,6 +799,7 @@
   var schemaDriftDismiss = $('schema-drift-dismiss');
   var schemaDriftReport = $('schema-drift-report');
   var lastDashboard = null;
+  var attentionReturnFocus = null;
   var activeSchemaDriftReport = null;
   var lastSchemaDriftFingerprint = '';
   var DASHBOARD_SPLASH_MIN_MS = Number.isFinite(Number(window.__cmcSplashMinMs))
@@ -805,6 +811,7 @@
   var dashboardSplashTimer = 0;
   var liveFingerprints = {
     session: '',
+    attention: '',
     feed: '',
     quarter: '',
     replay: '',
@@ -1032,6 +1039,34 @@
     trigger.setAttribute('aria-expanded', 'true');
   }
 
+  function attentionSeverityColor(severity) {
+    if (severity === 'critical') return '#ff5252';
+    if (severity === 'review') return '#ffd54a';
+    if (severity === 'watch') return '#61d6ff';
+    return '#60ff9a';
+  }
+
+  function renderAttentionEntry(attention) {
+    var state = attention || { count: 0, summary: 'No attention needed', highestSeverity: 'info' };
+    var count = Number(state.count || 0);
+    var severity = state.highestSeverity || (count > 0 ? 'watch' : 'info');
+    if (count <= 0) {
+      return '<div class="cmc-attention-entry quiet" role="status">'
+        + '<span class="cmc-attention-copy">'
+        + '<span class="cmc-attention-kicker">Attention</span>'
+        + '<span class="cmc-attention-summary">' + escapeHtml(state.summary || 'No attention needed') + '</span>'
+        + '</span>'
+        + '</div>';
+    }
+    return '<button class="cmc-attention-entry ' + escapeHtml(severity) + '" type="button" data-cmc-action="attention-center" aria-haspopup="dialog">'
+      + '<span class="cmc-attention-copy">'
+      + '<span class="cmc-attention-kicker">Attention</span>'
+      + '<span class="cmc-attention-summary">' + escapeHtml(state.summary || 'No attention needed') + '</span>'
+      + '</span>'
+      + '<span class="cmc-attention-count">' + escapeHtml(String(count)) + '</span>'
+      + '</button>';
+  }
+
   function renderSession(view) {
     var body = panelBody(domSession);
     if (!body) return;
@@ -1044,8 +1079,9 @@
           return '<div class="cmc-provider-alert">' + escapeHtml(alert) + '</div>';
         }).join('')
       : '';
+    var attentionHtml = renderAttentionEntry(view.attention);
     if (!options.length) {
-      body.innerHTML = alertsHtml + '<div class="cmc-label">No running Copilot sessions found. Start Copilot CLI and this panel will show the active task.</div>';
+      body.innerHTML = alertsHtml + attentionHtml + '<div class="cmc-label">No running Copilot sessions found. Start Copilot CLI and this panel will show the active task.</div>';
       return;
     }
     var selectedId = selected && selected.id;
@@ -1090,7 +1126,7 @@
         + '<button class="cmc-button ' + (tcalls > 0 ? '' : 'disabled') + '" aria-label="Open inspector for selected session" ' + (tcalls > 0 ? 'data-cmc-action="inspector"' : 'disabled aria-disabled="true"') + '>Inspector</button>'
         + '</div>';
     }
-    body.innerHTML = alertsHtml + picker + selectedHtml;
+    body.innerHTML = alertsHtml + attentionHtml + picker + selectedHtml;
     restoreSessionMenuIfNeeded(body, keepMenuOpen);
   }
 
@@ -1174,6 +1210,95 @@
     if (status) status.textContent = replay.status;
   }
 
+  function attentionActionLabel(action) {
+    if (action === 'open-schema-drift') return 'View schema details';
+    if (action === 'open-inspector') return 'Open inspector';
+    if (action === 'select-session') return 'View session';
+    return '';
+  }
+
+  function renderAttentionDialog(attention) {
+    if (!attentionSubtitle || !attentionBody) return;
+    var state = attention || { count: 0, empty: 'No attention needed.', items: [] };
+    var count = Number(state.count || 0);
+    attentionSubtitle.textContent = count > 0
+      ? 'Reliable signals only. No prompts, tool arguments, command output, file paths, or diffs are shown.'
+      : '';
+    var items = state.items || [];
+    if (!items.length) {
+      attentionBody.innerHTML = '<div class="attention-empty">' + escapeHtml(state.empty || 'No attention needed.') + '</div>';
+      return;
+    }
+    attentionBody.innerHTML = '<div class="attention-list">' + items.map(function (item) {
+      var actionLabel = attentionActionLabel(item.action);
+      var actionHtml = actionLabel
+        ? '<div class="cmc-actions"><button class="cmc-button accent" type="button" data-attention-action="' + escapeHtml(item.action) + '" data-attention-id="' + escapeHtml(item.id) + '">' + escapeHtml(actionLabel) + '</button></div>'
+        : '<div class="cmc-muted">Guidance is shown in the selected session panel when available.</div>';
+      return '<article class="attention-item" style="--attention-color:' + attentionSeverityColor(item.severity) + '">'
+        + '<div class="attention-item-head">'
+        + '<div class="attention-item-title">' + escapeHtml(item.title || 'Attention item') + '</div>'
+        + '<div class="attention-tags">'
+        + '<span class="attention-tag">' + escapeHtml(item.severity || 'info') + '</span>'
+        + '<span class="attention-tag">' + escapeHtml(item.confidence || 'direct') + '</span>'
+        + '<span class="attention-tag">' + escapeHtml(item.source || 'session') + '</span>'
+        + '</div>'
+        + '</div>'
+        + '<div class="attention-item-detail">' + escapeHtml(item.detail || '') + '</div>'
+        + actionHtml
+        + '</article>';
+    }).join('') + '</div>';
+  }
+
+  function openAttentionCenter(returnFocus) {
+    if (!attentionOverlay) return;
+    attentionReturnFocus = returnFocus || document.activeElement;
+    renderAttentionDialog(lastDashboard && lastDashboard.attention);
+    attentionOverlay.classList.add('visible');
+    attentionOverlay.setAttribute('aria-hidden', 'false');
+    if (attentionDialog && attentionDialog.focus) attentionDialog.focus();
+  }
+
+  function closeAttentionCenter() {
+    if (!attentionOverlay) return;
+    attentionOverlay.classList.remove('visible');
+    attentionOverlay.setAttribute('aria-hidden', 'true');
+    if (attentionReturnFocus && attentionReturnFocus.focus) attentionReturnFocus.focus();
+    attentionReturnFocus = null;
+  }
+
+  function attentionItemById(id) {
+    var items = lastDashboard && lastDashboard.attention && lastDashboard.attention.items;
+    return (items || []).find(function (item) { return item.id === id; }) || null;
+  }
+
+  function openSelectedInspectorAfterRender() {
+    window.setTimeout(function () {
+      var selected = lastDashboard && lastDashboard.sessions && lastDashboard.sessions.selected;
+      if (selected) openInspector(selected, null);
+    }, 0);
+  }
+
+  function runAttentionAction(item) {
+    if (!item) return;
+    if (item.action === 'open-schema-drift') {
+      var report = lastDashboard && lastDashboard.schemaDrift && lastDashboard.schemaDrift[0];
+      closeAttentionCenter();
+      if (report) renderSchemaDriftDialog(report);
+      return;
+    }
+    if (item.sessionId && typeof window.__cmcSelectSession === 'function') {
+      window.__cmcSelectSession(item.sessionId);
+    }
+    if (item.action === 'open-inspector') {
+      closeAttentionCenter();
+      openSelectedInspectorAfterRender();
+      return;
+    }
+    if (item.action === 'select-session') {
+      closeAttentionCenter();
+    }
+  }
+
   function sessionFingerprint(view) {
     var sessions = (view && view.sessions) || {};
     var selected = sessions.selected || {};
@@ -1203,6 +1328,31 @@
       activity.tool || '',
       activity.age || '',
       (view.providerAlerts || []).join('|'),
+      attentionFingerprint(view),
+    ].join('::');
+  }
+
+  function attentionFingerprint(view) {
+    var attention = (view && view.attention) || {};
+    var items = attention.items || [];
+    return [
+      attention.count || 0,
+      attention.highestSeverity || '',
+      attention.summary || '',
+      attention.empty || '',
+      items.map(function (item) {
+        return [
+          item.id || '',
+          item.severity || '',
+          item.confidence || '',
+          item.source || '',
+          item.sessionId || '',
+          item.title || '',
+          item.detail || '',
+          item.action || '',
+          item.timestamp || '',
+        ].join(':');
+      }).join('|'),
     ].join('::');
   }
 
@@ -1402,6 +1552,7 @@
     renderQuarter(view);
     renderReplay(view);
     updateLiveFingerprints(view);
+    if (attentionOverlay && attentionOverlay.classList.contains('visible')) renderAttentionDialog(view.attention);
     maybeShowSchemaDrift(view);
   };
 
@@ -1429,6 +1580,7 @@
       renderReplay(view);
       liveFingerprints.replay = nextReplay;
     }
+    if (attentionOverlay && attentionOverlay.classList.contains('visible')) renderAttentionDialog(view.attention);
   };
 
   window.__cmcRenderQuarter = function (quarter) {
@@ -1440,6 +1592,11 @@
   document.addEventListener('click', function (event) {
     var target = event.target;
     if (!target || !target.closest) return;
+    var attentionAction = target.closest('[data-attention-action]');
+    if (attentionAction) {
+      runAttentionAction(attentionItemById(attentionAction.getAttribute('data-attention-id') || ''));
+      return;
+    }
     var menuTrigger = target.closest('[data-cmc-action="session-menu"]');
     if (menuTrigger) {
       toggleSessionMenu(menuTrigger);
@@ -1457,6 +1614,7 @@
     if (action.disabled || action.classList.contains('disabled')) return;
     var name = action.getAttribute('data-cmc-action');
     if (name === 'editor' && typeof window.__cmcOpenSelectedSessionInEditor === 'function') window.__cmcOpenSelectedSessionInEditor();
+    if (name === 'attention-center') openAttentionCenter(action);
     if (name === 'inspector' && lastDashboard && lastDashboard.sessions && lastDashboard.sessions.selected) openInspector(lastDashboard.sessions.selected, action);
     if (name === 'quarter-details' && lastDashboard && lastDashboard.sessions && lastDashboard.sessions.selected) {
       openSectorInspector(lastDashboard.sessions.selected, {
@@ -1488,6 +1646,13 @@
     });
   });
 
+  if (attentionClose) attentionClose.addEventListener('click', closeAttentionCenter);
+  if (attentionOverlay) {
+    attentionOverlay.addEventListener('click', function (event) {
+      if (event.target === attentionOverlay) closeAttentionCenter();
+    });
+  }
+
   if (schemaDriftReport) {
     schemaDriftReport.addEventListener('click', function () {
       if (!activeSchemaDriftReport) return;
@@ -1509,6 +1674,10 @@
         if (trigger && typeof trigger.focus === 'function') trigger.focus();
         return;
       }
+    }
+    if (event.key === 'Escape' && attentionOverlay && attentionOverlay.classList.contains('visible')) {
+      closeAttentionCenter();
+      return;
     }
     if (event.key === 'Escape' && schemaDriftOverlay && schemaDriftOverlay.classList.contains('visible')) {
       closeSchemaDriftDialog();

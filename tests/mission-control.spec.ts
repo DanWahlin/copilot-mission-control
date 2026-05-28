@@ -172,6 +172,7 @@ function expectNoQuarterFrameOverlaps(rects: Array<{ key: string; left: number; 
 function inspectorFixture() {
   const fixture = JSON.parse(JSON.stringify(MISSION_FIXTURE));
   const beta = fixture.sessions.find((session: any) => session.id === 'beta4567');
+  beta.session_name = 'Review Tests';
   beta.recent_tool_calls = [
     {
       tool: 'browser_navigate',
@@ -1200,6 +1201,102 @@ test.describe('Copilot Mission Control — Dashboard', () => {
     });
     expect(stored.inspectedDistrictKey).toBeUndefined();
     expect(stored.inspectedQuarterKey).toBe('library');
+  });
+});
+
+test.describe('Copilot Mission Control — Attention Center', () => {
+  test('renders a quiet empty state without adding feed clutter', async ({ page }) => {
+    const fixture = {
+      ...MISSION_FIXTURE,
+      active_sessions: 1,
+      sessions: [
+        { ...MISSION_FIXTURE.sessions[0], is_active: true, error_count: 0, status: 'working' },
+        { ...MISSION_FIXTURE.sessions[1], is_active: false, error_count: 0, status: 'idle' },
+      ],
+      recent_events: MISSION_FIXTURE.recent_events.filter(event => event.success),
+      alerts: [],
+      schema_drift: [],
+    };
+    await installFixture(page, fixture);
+    await page.goto(GAME_URL);
+    await waitForGame(page);
+
+    await expect(page.locator('#dom-session .cmc-attention-entry')).toBeVisible();
+    await expect(page.locator('#dom-session .cmc-attention-summary')).toHaveText('No attention needed');
+    await expect(page.locator('#dom-session .cmc-attention-count')).toHaveCount(0);
+    await expect(page.locator('#dom-session [data-cmc-action="attention-center"]')).toHaveCount(0);
+    await expect(page.locator('#dom-feed')).not.toContainText('Attention');
+  });
+
+  test('surfaces provider and schema issues with safe details only', async ({ page }) => {
+    const fixture = JSON.parse(JSON.stringify(MISSION_FIXTURE));
+    fixture.alerts = [
+      'Could not read home folders in \'Ubuntu\'. Start the WSL distro to enable scanning.',
+    ];
+    fixture.schema_drift = [
+      {
+        provider: 'copilot',
+        schema_version: '1.1.0',
+        severity: 'warning',
+        summary: 'Possible Copilot schema drift detected in 1 of 3 scanned sessions.',
+        checked_sessions: 3,
+        affected_sessions: 1,
+        total_events: 128,
+        recognized_events: 22,
+        tool_starts: 0,
+        tool_completes: 0,
+        missing_event_type: 0,
+        unknown_event_types: [{ name: 'assistant.new_shape', count: 42 }],
+        hints: [],
+        raw_prompt: 'SECRET_PROMPT',
+        file_path: '/Users/dan/project/private.ts',
+      },
+    ];
+    await installFixture(page, fixture);
+    await page.goto(GAME_URL);
+    await waitForGame(page);
+
+    await expect(page.locator('#schema-drift-overlay')).toHaveClass(/visible/);
+    await page.locator('#schema-drift-close').click();
+    await page.locator('#dom-session [data-cmc-action="attention-center"]').click();
+    await expect(page.locator('#attention-body')).toContainText('Provider scan needs review');
+    await expect(page.locator('#attention-body')).toContainText('Possible provider schema drift');
+    await expect(page.locator('#attention-dialog')).toContainText('No prompts, tool arguments, command output, file paths, or diffs');
+    await expect(page.locator('#attention-body')).not.toContainText('SECRET_PROMPT');
+    await expect(page.locator('#attention-body')).not.toContainText('/Users/dan');
+
+    await page.locator('#attention-body [data-attention-action="open-schema-drift"]').click();
+    await expect(page.locator('#schema-drift-overlay')).toHaveClass(/visible/);
+  });
+
+  test('opens the inspector from an active failure attention item', async ({ page }) => {
+    await page.addInitScript((fixture) => { (window as any).__missionControlFixture = fixture; }, inspectorFixture());
+    await page.goto(GAME_URL);
+    await waitForGame(page);
+
+    await expect(page.locator('#dom-session .cmc-attention-count')).toHaveText('1');
+    await page.locator('#dom-session [data-cmc-action="attention-center"]').click();
+    await expect(page.locator('#attention-body')).toContainText('Review Tests has failures to review');
+    await expect(page.locator('#attention-body')).toContainText('matched active tool or hook results');
+    await page.locator('#attention-body [data-attention-action="open-inspector"]').click();
+
+    await expect(page.locator('#attention-overlay')).not.toHaveClass(/visible/);
+    await expect(page.locator('#inspector-overlay')).toHaveClass(/visible/);
+    await expect(page.locator('#inspector-title')).toContainText('Review Tests');
+  });
+
+  test('selects the session when an attention item has no retained inspector rows', async ({ page }) => {
+    await installFixture(page);
+    await page.goto(GAME_URL);
+    await waitForGame(page);
+
+    await selectSession(page, 'alpha123');
+    await expect.poll(async () => (await getMissionState(page))!.selectedSessionId).toBe('alpha123');
+    await page.locator('#dom-session [data-cmc-action="attention-center"]').click();
+    await page.locator('#attention-body [data-attention-action="select-session"]').click();
+
+    await expect.poll(async () => (await getMissionState(page))!.selectedSessionId).toBe('beta4567');
+    await expect(page.locator('#attention-overlay')).not.toHaveClass(/visible/);
   });
 });
 

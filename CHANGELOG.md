@@ -7,6 +7,10 @@ All notable changes to Copilot Mission Control.
 
 - Update image links in README to use absolute URLs
 - Update image links in README to use relative URLs
+
+### ⚙️ CI/CD & Build
+
+- Release v0.1.6
 ## [0.1.5] - 2026-05-27
 
 ### ⚙️ CI/CD & Build
