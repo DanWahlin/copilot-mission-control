@@ -9,13 +9,13 @@ The architecture is **provider-agnostic by design** — the `AgentProvider` trai
 ## Repository Structure
 
 ```
-src/game/                — Frontend code (TypeScript, Phaser 4)
-src/game/scenes/         — Phaser scenes
-  MissionControl.ts      — The product. One scene; the entire dashboard
+src/                     — Frontend code (TypeScript, Phaser 4)
+src/scenes/              — Phaser scenes
+  MissionControl.ts      — Mission map scene, sectors, pulses, and Phaser layout
   viewport.ts            — W/H exports + refreshDimensions() (resize helper)
-src/game/game.ts         — Single-scene Phaser bootstrap (~55 lines)
-src/game/index.html      — Slim 32 px top bar + #game div
-src/game/hud.js          — Panels toggle + theme toggle + mute (M key)
+src/main.ts              — Single-scene Phaser bootstrap (~55 lines)
+src/index.html           — Slim 32 px top bar + #game div
+src/hud.js               — Top bar, History route, dashboard panels, inspectors, Attention Center
 src-tauri/               — Tauri 2 Rust backend
   src/lib.rs             — Tauri commands + tray + window-state plugin
   src/agent.rs           — AgentProvider trait + CopilotProvider + fs watcher
@@ -63,15 +63,19 @@ npx playwright test tests/mission-control.spec.ts # scene tests only
 npx playwright test --headed                      # visible browser
 ```
 
-The Playwright `webServer` config serves `dist/` over `python3 -m http.server 4173`. The current suite is **27 tests** covering startup, dashboard panels, replay/scrubber, session selection, ops mode classification, and a six-viewport layout regression.
+The Playwright `webServer` config serves `dist/` over `python3 -m http.server 4173`. The suite covers startup, dashboard panels, History, replay/scrubber, session selection, token display, Attention Center behavior, ops mode classification, and multi-viewport layout regressions.
 
 ## Key Patterns
 
 - **`MissionControlScene` extends `Phaser.Scene` directly.** There is no `BaseScene`. The scene paints its own full-window backdrop in `create()` (depth -100) and redraws it on `scale.resize`.
 - **Single scene.** Boot Phaser → instantiate `MissionControlScene` → resize listener calls `refreshDimensions()` + `scale.resize(W, H)` so the scene re-lays-out the dashboard on every window change.
+- **DOM dashboard ownership.** Phaser renders the mission map, sectors, pulses, and ops status. `hud.js` owns dashboard panels, History, replay controls, the session/sector inspector, Attention Center, and schema-drift dialog.
 - **Push-driven updates.** The Rust watcher debounces FS events (~300 ms) and calls `win.eval("window.__cmcOnAgentActivityChanged && window.__cmcOnAgentActivityChanged()")`. The 30 s poll in the scene is a fallback for environments where the watcher fails to attach.
 - **Privacy invariant.** The `AgentProvider::scan()` boundary is the only place where Copilot session data is read. Only allowlisted fields cross into `AgentEventSummary` / `AgentSessionSummary` — never raw prompts, tool args, command output, file paths, or diffs.
 - **Provider schemas.** Copilot scanning is driven by the bundled schema in `src-tauri/provider-schemas/copilot.json`; the matching published copy lives in `docs/provider-schemas/copilot/` for GitHub Pages. Schema changes must keep both copies byte-identical, update the index checksum, and preserve strict allowlists for safe paths/details only.
+- **Token totals.** Live sessions may emit output usage before input totals; show input tokens as `pending` rather than `0` when Copilot has not emitted input usage yet. Final input/output totals usually arrive through Copilot usage summaries or `session.shutdown`.
+- **History.** User-facing History buckets use local calendar days, not UTC day labels. Copilot CLI `--continue` creates a new local session record with resume metadata, so the UI should not assume it is the same session id.
+- **Attention Center.** Keep it actionable-only: provider scan problems and schema drift belong there; ordinary failed tool or hook completions should stay in activity/failure history instead of creating alerts.
 - **`window.__phaserGame`** is set so Playwright can reach into the scene registry without DOM scraping.
 - **LocalStorage keys** are prefixed `cmc_` (e.g., `cmc_muted`, `cmc_panels_hidden`, `cmc_prefs`).
 

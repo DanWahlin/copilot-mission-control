@@ -790,8 +790,8 @@
   var dashboardOverlay = $('dashboard-overlay');
   var historyScreen = $('history-screen');
   var historyContent = $('history-content');
+  var historyKpiSummary = $('history-kpi-summary');
   var historyLiveStamp = $('history-live-stamp');
-  var historyTokenSummary = $('history-token-summary');
   var historySessionFilterSelect = $('history-session-filter');
   var missionRouteBtn = $('mission-route-btn');
   var historyRouteBtn = $('history-route-btn');
@@ -875,6 +875,12 @@
       if (options && options.focus && historyScreen && typeof historyScreen.focus === 'function') {
         historyScreen.focus({ preventScroll: true });
       }
+    } else if (previous === 'history' && lastDashboard) {
+      window.requestAnimationFrame(function () {
+        if (appRoute === 'mission' && lastDashboard && typeof window.__cmcRenderDashboard === 'function') {
+          window.__cmcRenderDashboard(lastDashboard);
+        }
+      });
     }
   }
 
@@ -953,6 +959,13 @@
     el.style.height = Number.isFinite(rect.h) ? Math.round(rect.h) + 'px' : 'auto';
   }
 
+  function naturalPanelHeight(el, fallback) {
+    if (!el) return 0;
+    var rectH = Math.ceil(el.getBoundingClientRect().height || 0);
+    var scrollH = Math.ceil(el.scrollHeight || 0);
+    return Math.max(rectH, scrollH, fallback || 0);
+  }
+
   function panelBody(el) {
     return el && el.querySelector('.cmc-panel-body');
   }
@@ -981,10 +994,10 @@
     return Number(value || 0).toLocaleString();
   }
 
-  function tokenLabel(input, output) {
+  function tokenLabel(input, output, inputPending) {
     var inTok = Number(input || 0);
     var outTok = Number(output || 0);
-    return exactNumber(inTok) + ' / ' + exactNumber(outTok);
+    return (inputPending ? 'pending' : exactNumber(inTok)) + ' / ' + exactNumber(outTok);
   }
 
   function ageLabel(seconds) {
@@ -1106,21 +1119,21 @@
   }
 
   function renderAttentionEntry(attention) {
-    var state = attention || { count: 0, summary: 'No attention needed', highestSeverity: 'info' };
+    var state = attention || { count: 0, summary: 'No action needed', highestSeverity: 'info' };
     var count = Number(state.count || 0);
     var severity = state.highestSeverity || (count > 0 ? 'watch' : 'info');
     if (count <= 0) {
       return '<div class="cmc-attention-entry quiet" role="status">'
         + '<span class="cmc-attention-copy">'
         + '<span class="cmc-attention-kicker">Attention</span>'
-        + '<span class="cmc-attention-summary">' + escapeHtml(state.summary || 'No attention needed') + '</span>'
+        + '<span class="cmc-attention-summary">' + escapeHtml(state.summary || 'No action needed') + '</span>'
         + '</span>'
         + '</div>';
     }
     return '<button class="cmc-attention-entry ' + escapeHtml(severity) + '" type="button" data-cmc-action="attention-center" aria-haspopup="dialog">'
       + '<span class="cmc-attention-copy">'
       + '<span class="cmc-attention-kicker">Attention</span>'
-      + '<span class="cmc-attention-summary">' + escapeHtml(state.summary || 'No attention needed') + '</span>'
+      + '<span class="cmc-attention-summary">' + escapeHtml(state.summary || 'No action needed') + '</span>'
       + '</span>'
       + '<span class="cmc-attention-count">' + escapeHtml(String(count)) + '</span>'
       + '</button>';
@@ -1138,9 +1151,8 @@
           return '<div class="cmc-provider-alert">' + escapeHtml(alert) + '</div>';
         }).join('')
       : '';
-    var attentionHtml = renderAttentionEntry(view.attention);
     if (!options.length) {
-      body.innerHTML = alertsHtml + attentionHtml + '<div class="cmc-label">No running Copilot sessions found. Start Copilot CLI and this panel will show the active task.</div>';
+      body.innerHTML = alertsHtml + '<div class="cmc-label">No running Copilot sessions found. Start Copilot CLI and this panel will show the active task.</div>';
       return;
     }
     var selectedId = selected && selected.id;
@@ -1162,6 +1174,7 @@
     if (selected) {
       var inTok = selected.input_tokens || 0;
       var outTok = selected.output_tokens || 0;
+      var inputPending = !selected.replay_activity && inTok <= 0 && outTok > 0;
       var tcalls = (selected.recent_tool_calls || []).length;
       var hasGitRoot = !!selected.git_root;
       var activity = selected.replay_activity || selectedActivity(selected);
@@ -1177,7 +1190,7 @@
         + '<span class="cmc-meta-pill">Last: ' + escapeHtml(activity.last) + '</span>'
         + '<span class="cmc-meta-pill">Tool: ' + escapeHtml(activity.tool) + '</span>'
         + '<span class="cmc-meta-pill">Age: ' + escapeHtml(activity.age) + '</span>'
-        + '<span class="cmc-meta-pill">Tokens in/out: ' + tokenLabel(inTok, outTok) + '</span>'
+        + '<span class="cmc-meta-pill">Tokens in/out: ' + tokenLabel(inTok, outTok, inputPending) + '</span>'
         + '</div>'
         + '</div>'
         + '<div class="cmc-actions">'
@@ -1185,7 +1198,7 @@
         + '<button class="cmc-button ' + (tcalls > 0 ? '' : 'disabled') + '" aria-label="Open inspector for selected session" ' + (tcalls > 0 ? 'data-cmc-action="inspector"' : 'disabled aria-disabled="true"') + '>Inspector</button>'
         + '</div>';
     }
-    body.innerHTML = alertsHtml + attentionHtml + picker + selectedHtml;
+    body.innerHTML = alertsHtml + picker + selectedHtml;
     restoreSessionMenuIfNeeded(body, keepMenuOpen);
   }
 
@@ -1278,14 +1291,14 @@
 
   function renderAttentionDialog(attention) {
     if (!attentionSubtitle || !attentionBody) return;
-    var state = attention || { count: 0, empty: 'No attention needed.', items: [] };
+    var state = attention || { count: 0, empty: 'No action needed.', items: [] };
     var count = Number(state.count || 0);
     attentionSubtitle.textContent = count > 0
       ? 'Reliable signals only. No prompts, tool arguments, command output, file paths, or diffs are shown.'
       : '';
     var items = state.items || [];
     if (!items.length) {
-      attentionBody.innerHTML = '<div class="attention-empty">' + escapeHtml(state.empty || 'No attention needed.') + '</div>';
+      attentionBody.innerHTML = '<div class="attention-empty">' + escapeHtml(state.empty || 'No action needed.') + '</div>';
       return;
     }
     attentionBody.innerHTML = '<div class="attention-list">' + items.map(function (item) {
@@ -1703,6 +1716,14 @@
     return 0;
   }
 
+  function historyUniqueModelCount(history) {
+    var metrics = Array.isArray(history && history.model_mix) ? history.model_mix : [];
+    var modelNames = metrics.map(function (metric) {
+      return String(metric && metric.name || '').trim();
+    }).filter(Boolean);
+    return new Set(modelNames).size;
+  }
+
   function historyKpis(view, history, scoped) {
     var activity = view && view.activity || {};
     var sessions = history.recent_sessions || [];
@@ -1710,19 +1731,23 @@
     var bucketEvents = (history.activity_24h || []).reduce(function (sum, bucket) { return sum + Number(bucket.event_count || 0); }, 0);
     var eventTotal = historyMetricTotal(history, 'event_count', scoped ? bucketEvents : activity.totalEvents);
     var toolTotal = historyMetricTotal(history, 'tool_count', scoped ? undefined : activity.totalToolCalls);
+    var tokenTotals = tokenTotalsForHistory(view, history, scoped);
     var cards = [
-      ['Sessions scanned', scoped ? sessions.length : activity.scannedSessions, scoped ? 'selected session' : (activity.activeSessions || 0) + ' active'],
-      ['Sanitized events', eventTotal, 'observed scan data'],
-      ['Tool calls', toolTotal, 'privacy-safe names'],
-      ['Failures', history.failure_count, 'sanitized failure events'],
-      ['Last activity', lastActivity, sessions.length ? sessions.length + ' recent sessions' : 'no sessions yet'],
+      { label: 'Sessions Scanned', value: scoped ? sessions.length : activity.scannedSessions },
+      { label: 'Events', value: eventTotal },
+      { label: 'Tool Calls', value: toolTotal },
+      { label: 'Models Used', value: historyUniqueModelCount(history) },
+      { label: 'Last Activity', value: lastActivity },
+      { label: 'Input Tokens', value: tokenTotals.input, token: true },
+      { label: 'Output Tokens', value: tokenTotals.output, token: true },
     ];
     return '<section class="history-kpis" aria-label="History summary metrics">'
       + cards.map(function (card) {
-        return '<article class="history-kpi">'
-          + '<div class="history-kpi-label">' + escapeHtml(card[0]) + '</div>'
-          + '<div class="history-kpi-value">' + escapeHtml(typeof card[1] === 'number' ? exactNumber(card[1]) : card[1]) + '</div>'
-          + '<div class="history-kpi-note">' + escapeHtml(card[2]) + '</div>'
+        var value = typeof card.value === 'number' ? exactNumber(card.value) : card.value;
+        return '<article class="history-kpi' + (card.token ? ' history-token-kpi' : '') + '">'
+          + '<div class="history-kpi-label' + (card.token ? ' history-token-label' : '') + '">' + escapeHtml(card.label) + '</div>'
+          + '<div class="history-kpi-value' + (card.token ? ' history-token-value' : '') + '">' + escapeHtml(value) + '</div>'
+          + (card.note ? '<div class="history-kpi-note">' + escapeHtml(card.note) + '</div>' : '')
           + '</article>';
       }).join('')
       + '</section>';
@@ -1741,13 +1766,6 @@
       input: Number(activity.totalInputTokens || 0),
       output: Number(activity.totalOutputTokens || 0),
     };
-  }
-
-  function renderHistoryTokenSummary(view, history, scoped) {
-    if (!historyTokenSummary) return;
-    var totals = tokenTotalsForHistory(view, history, scoped);
-    historyTokenSummary.innerHTML = '<div><div class="history-token-label">Input tokens</div><div class="history-token-value">' + escapeHtml(exactNumber(totals.input)) + '</div></div>'
-      + '<div><div class="history-token-label">Output tokens</div><div class="history-token-value">' + escapeHtml(exactNumber(totals.output)) + '</div></div>';
   }
 
   function updateHistoryChartReadout(target, event) {
@@ -1789,7 +1807,7 @@
       var index = count === 24
         ? (hour === 24 ? count - 1 : Math.min(hour, count - 1))
         : Math.round((hour / 24) * (count - 1));
-      labels.set(index, String(hour).padStart(2, '0'));
+      labels.set(index, String(hour));
     });
     return labels;
   }
@@ -1802,7 +1820,7 @@
 
   function renderHistoryChart(title, copy, buckets, idPrefix) {
     var data = Array.isArray(buckets) ? buckets : [];
-    if (!data.length || !data.some(function (bucket) { return Number(bucket.event_count || 0) > 0 || Number(bucket.failure_count || 0) > 0; })) {
+    if (!data.length || !data.some(function (bucket) { return Number(bucket.event_count || 0) > 0; })) {
       return '<article class="history-card" data-history-card="' + escapeHtml(idPrefix) + '">'
         + '<div class="history-card-title"><span>' + escapeHtml(title) + '</span><span>events</span></div>'
         + '<p class="history-card-copy">' + escapeHtml(copy) + '</p>'
@@ -1811,7 +1829,7 @@
     }
 
     var max = data.reduce(function (acc, bucket) {
-      return Math.max(acc, Number(bucket.event_count || 0), Number(bucket.failure_count || 0));
+      return Math.max(acc, Number(bucket.event_count || 0));
     }, 1);
     var width = 720;
     var height = 180;
@@ -1824,47 +1842,46 @@
     var barW = Math.max(3, (plotW - gap * (data.length - 1)) / data.length);
     var useRelativeHours = idPrefix === 'history-24h';
     var hourAxisLabels = useRelativeHours ? historyHourAxisLabels(data.length) : null;
+    var axisLabels = [];
     var bars = data.map(function (bucket, index) {
       var total = Number(bucket.event_count || 0);
-      var failures = Number(bucket.failure_count || 0);
       var x = left + index * (barW + gap);
       var totalH = Math.max(total > 0 ? 2 : 0, (total / max) * plotH);
-      var failureH = Math.max(failures > 0 ? 2 : 0, (failures / max) * plotH);
       var y = top + plotH - totalH;
-      var fy = top + plotH - failureH;
       var bucketLabel = useRelativeHours ? historyHourReadoutLabel(index, data.length) : bucket.label;
       var axisLabel = useRelativeHours ? hourAxisLabels.get(index) : bucket.label;
-      var readout = bucketLabel + ': ' + exactNumber(total) + ' events, ' + exactNumber(failures) + ' failures, ' + exactNumber(Number(bucket.active_sessions || 0)) + ' sessions';
+      var readout = bucketLabel + ': ' + exactNumber(total) + ' events, ' + exactNumber(Number(bucket.active_sessions || 0)) + ' sessions';
       var readoutAttr = ' data-history-readout="' + escapeHtml(readout) + '" tabindex="0" aria-label="' + escapeHtml(readout) + '"';
-      var label = axisLabel
-        ? '<text x="' + (x + barW / 2).toFixed(1) + '" y="' + (height - 8) + '" text-anchor="middle">' + escapeHtml(axisLabel) + '</text>'
-        : '';
       var markerX = x + barW / 2;
+      if (axisLabel) {
+        axisLabels.push({ label: axisLabel, left: (markerX / width) * 100 });
+      }
       return '<g>'
         + '<rect class="activity-soft" x="' + x.toFixed(1) + '" y="' + top + '" width="' + barW.toFixed(1) + '" height="' + plotH + '" rx="3"' + readoutAttr + '></rect>'
         + '<rect class="activity" x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + barW.toFixed(1) + '" height="' + totalH.toFixed(1) + '" rx="3"' + readoutAttr + '></rect>'
-        + (failures > 0 ? '<rect class="failure" x="' + x.toFixed(1) + '" y="' + fy.toFixed(1) + '" width="' + barW.toFixed(1) + '" height="' + failureH.toFixed(1) + '" rx="3"' + readoutAttr + '></rect>' : '')
-        + '<line class="activity-marker" x1="' + markerX.toFixed(1) + '" y1="' + y.toFixed(1) + '" x2="' + markerX.toFixed(1) + '" y2="' + (top + plotH).toFixed(1) + '"' + readoutAttr + '></line>'
-        + (failures > 0 ? '<line class="failure-marker" x1="' + (x + 1).toFixed(1) + '" y1="' + fy.toFixed(1) + '" x2="' + (x + barW - 1).toFixed(1) + '" y2="' + fy.toFixed(1) + '"' + readoutAttr + '></line>' : '')
-        + label
         + '</g>';
     }).join('');
     var summary = data.reduce(function (acc, bucket) {
       acc.events += Number(bucket.event_count || 0);
-      acc.failures += Number(bucket.failure_count || 0);
       return acc;
-    }, { events: 0, failures: 0 });
+    }, { events: 0 });
+    var axisHtml = axisLabels.map(function (item) {
+      return '<span style="left:' + item.left.toFixed(3) + '%">' + escapeHtml(item.label) + '</span>';
+    }).join('');
 
     return '<article class="history-card" data-history-card="' + escapeHtml(idPrefix) + '">'
       + '<div class="history-card-title"><span>' + escapeHtml(title) + '</span><span>events</span></div>'
       + '<p class="history-card-copy">' + escapeHtml(copy) + '</p>'
+      + '<div class="history-chart-frame">'
       + '<svg class="history-chart" viewBox="0 0 ' + width + ' ' + height + '" role="img" aria-labelledby="' + escapeHtml(idPrefix) + '-title ' + escapeHtml(idPrefix) + '-desc" preserveAspectRatio="none">'
       + '<title id="' + escapeHtml(idPrefix) + '-title">' + escapeHtml(title) + '</title>'
-      + '<desc id="' + escapeHtml(idPrefix) + '-desc">' + escapeHtml(summary.events + ' events and ' + summary.failures + ' failures across observed buckets.') + '</desc>'
+      + '<desc id="' + escapeHtml(idPrefix) + '-desc">' + escapeHtml(summary.events + ' events across observed buckets.') + '</desc>'
       + '<line class="axis" x1="' + left + '" y1="' + (top + plotH) + '" x2="' + (width - 8) + '" y2="' + (top + plotH) + '"></line>'
       + bars
       + '</svg>'
-      + '<div class="history-legend"><span>Events</span><span class="failure">Failures</span></div>'
+      + '<div class="history-chart-axis" aria-hidden="true">' + axisHtml + '</div>'
+      + '</div>'
+      + '<div class="history-legend"><span>Events</span></div>'
       + '<div class="history-chart-readout" aria-live="polite">Hover a bar for exact values.</div>'
       + '</article>';
   }
@@ -1895,6 +1912,85 @@
       + '</article>';
   }
 
+  function renderVerticalRankCard(title, copy, metrics, empty, options) {
+    var rows = Array.isArray(metrics) ? metrics : [];
+    var max = rows.reduce(function (acc, row) { return Math.max(acc, Number(row.count || 0)); }, 0);
+    var cardId = options && options.cardId ? options.cardId : cssToken(title);
+    var titleMeta = options && options.titleMeta ? options.titleMeta : 'count';
+    var body = rows.length && max > 0
+      ? '<div class="history-rank-list compact-ranks vertical-ranks">' + rows.map(function (metric, index) {
+          var name = metric.name || 'Unknown';
+          var color = options && options.categoryColors ? historyCategoryColor(name) : (options && options.paletteColors ? historyPaletteColor(index) : 'var(--history-activity)');
+          var label = options && options.categoryLabels ? categoryLabel(name) : name;
+          var pct = Number(metric.percent || 0);
+          var countLabel = exactNumber(metric.count || 0) + (pct > 0 ? ' · ' + pct.toFixed(1).replace(/\.0$/, '') + '%' : '');
+          return '<div class="history-rank-row" style="--bar-color:' + escapeHtml(color) + '">'
+            + '<div class="history-rank-meta"><span class="history-rank-name" title="' + escapeHtml(label) + '">' + escapeHtml(label) + '</span><span>' + escapeHtml(countLabel) + '</span></div>'
+            + '<div class="history-bar" aria-hidden="true"><div class="history-bar-fill" style="--bar:' + Math.max(2, Math.round((Number(metric.count || 0) / max) * 100)) + '%;--bar-color:' + escapeHtml(color) + '"></div></div>'
+            + '</div>';
+        }).join('') + '</div>'
+      : '<div class="history-empty">' + escapeHtml(empty) + '</div>';
+    return '<article class="history-card history-rank-chart-card" data-history-card="' + escapeHtml(cardId) + '">'
+      + '<div class="history-card-title"><span>' + escapeHtml(title) + '</span><span>' + escapeHtml(titleMeta) + '</span></div>'
+      + '<p class="history-card-copy">' + escapeHtml(copy) + '</p>'
+      + body
+      + '</article>';
+  }
+
+  function renderActivityBreakdown(history) {
+    return renderVerticalRankCard(
+      'Activity Breakdown',
+      'Distribution by Mission Control category across observed events.',
+      history.category_mix,
+      'No categorized events are visible yet.',
+      { categoryColors: true, categoryLabels: true, cardId: 'event-mix' },
+    );
+  }
+
+  function renderTopToolsCompact(history) {
+    return renderRankCard(
+      'Top tools',
+      'Most-used allowlisted tool names, capped by the backend.',
+      history.top_tools,
+      'No tool usage is visible yet.',
+      { paletteColors: true, cardId: 'top-tools', listClass: 'compact-ranks' },
+    ).replace('class="history-card"', 'class="history-card compact-card"');
+  }
+
+  function renderSessionDistribution(sessions) {
+    var rows = Array.isArray(sessions) ? sessions : [];
+    var max = rows.reduce(function (acc, session) { return Math.max(acc, Number(session.event_count || 0)); }, 0);
+    var body = rows.length && max > 0
+      ? '<div class="history-session-distribution">' + rows.map(function (session, index) {
+          var title = session.title || session.session_name || session.repository || shortSessionId(session.id);
+          var events = Number(session.event_count || 0);
+          var failures = Number(session.error_count || 0);
+          var failurePct = events > 0 ? Math.max(0, Math.min(100, (failures / events) * 100)) : 0;
+          var barPct = Math.max(2, Math.round((events / max) * 100));
+          return '<div class="history-distribution-row" style="--bar:' + barPct + '%;--failure-bar:' + failurePct.toFixed(1) + '%;--bar-color:' + escapeHtml(historyPaletteColor(index)) + '">'
+            + '<div class="history-rank-meta"><span class="history-rank-name" title="' + escapeHtml(title) + '">' + escapeHtml(title) + '</span><span>' + escapeHtml(exactNumber(events) + ' events') + '</span></div>'
+            + '<div class="history-distribution-bar" aria-hidden="true"><div class="history-distribution-fill"></div><div class="history-distribution-failure"></div></div>'
+            + '<div class="history-row-meta">' + escapeHtml(exactNumber(failures) + ' failures · ' + (session.last_model || 'model unknown')) + '</div>'
+            + '</div>';
+        }).join('') + '</div>'
+      : '<div class="history-empty">No session distribution is visible yet.</div>';
+    return '<article class="history-card compact-card" data-history-card="session-distribution">'
+      + '<div class="history-card-title"><span>Session distribution</span><span>events</span></div>'
+      + '<p class="history-card-copy">Shows whether activity is spread across sessions or concentrated in a few outliers.</p>'
+      + body
+      + '</article>';
+  }
+
+  function renderModelsCompact(metrics) {
+    return renderRankCard(
+      'Models used',
+      'Turn-level models are counted when available; sessions fall back to the last observed model, including Unknown.',
+      metrics,
+      'No model-bearing activity is visible yet.',
+      { paletteColors: true, cardId: 'models-used', listClass: 'compact-ranks' },
+    ).replace('class="history-card"', 'class="history-card compact-card"');
+  }
+
   function renderHistorySessions(sessions) {
     var rows = Array.isArray(sessions) ? sessions : [];
     var body = rows.length
@@ -1908,11 +2004,10 @@
           var statusClass = cssToken(session.status || (session.is_active ? 'working' : 'idle'));
           return '<div class="history-session-row">'
             + '<span class="history-dossier-id">' + escapeHtml(shortSessionId(session.id)) + '</span>'
-            + '<div><div class="history-row-title" title="' + escapeHtml(title) + '">' + escapeHtml(title) + '</div>'
-            + '<div class="history-row-sub">' + escapeHtml(shortSessionId(session.id) + ' · ' + subtitleParts.join(' · ')) + '</div></div>'
+            + '<div class="history-session-main"><div class="history-row-title" title="' + escapeHtml(title) + '">' + escapeHtml(title) + '</div>'
+            + '<div class="history-row-sub">' + escapeHtml(subtitleParts.join(' · ')) + '</div></div>'
             + '<span class="history-status ' + escapeHtml(statusClass) + '">' + escapeHtml(session.status || (session.is_active ? 'active' : 'idle')) + '</span>'
-            + '<div class="history-row-meta">' + escapeHtml(exactNumber(session.event_count || 0) + ' events · ' + exactNumber(session.error_count || 0) + ' failures') + '</div>'
-            + '<div class="history-row-meta">' + escapeHtml(historyAgeLabel(session.updated_at)) + '</div>'
+            + '<div class="history-row-meta history-session-age">' + escapeHtml(historyAgeLabel(session.updated_at)) + ' <span aria-hidden="true">·</span> <span class="history-session-stats">' + escapeHtml(exactNumber(session.event_count || 0) + ' events') + '</span></div>'
             + '</div>';
         }).join('') + '</div>'
       : '<div class="history-empty">No scanned sessions are available yet.</div>';
@@ -1974,7 +2069,7 @@
 
     if (!view) {
       if (historyLiveStamp) historyLiveStamp.textContent = 'Waiting for activity scan...';
-      if (historyTokenSummary) historyTokenSummary.innerHTML = '';
+      if (historyKpiSummary) historyKpiSummary.innerHTML = '';
       historyContent.innerHTML = '<div class="history-empty">Loading scanned Copilot history...</div>';
       return;
     }
@@ -1982,7 +2077,7 @@
     var history = view.history;
     if (!history) {
       if (historyLiveStamp) historyLiveStamp.textContent = 'History unavailable in this scan';
-      if (historyTokenSummary) historyTokenSummary.innerHTML = '';
+      if (historyKpiSummary) historyKpiSummary.innerHTML = '';
       historyContent.innerHTML = '<div class="history-empty">History data is not available from the current activity scan yet. Mission Control will update this route when the backend provides aggregate history.</div>';
       updateHistorySessionFilter(null);
       return;
@@ -1992,24 +2087,29 @@
     var scoped = historySessionFilter !== 'all';
     history = selectedHistorySummary(history);
     if (historyLiveStamp) historyLiveStamp.textContent = generatedAtLabel(history);
-    renderHistoryTokenSummary(view, history, scoped);
+    if (historyKpiSummary) historyKpiSummary.innerHTML = historyKpis(view, history, scoped);
     if (!historyHasData(history)) {
-      historyContent.innerHTML = historyKpis(view, history, scoped)
-        + '<div class="history-empty">No observed Copilot events are available yet. Start or continue a Copilot CLI session and this history view will populate from privacy-safe scan summaries.</div>';
+      historyContent.innerHTML = '<div class="history-empty">No observed Copilot events are available yet. Start or continue a Copilot CLI session and this history view will populate from privacy-safe scan summaries.</div>';
       return;
     }
 
-    historyContent.innerHTML = historyKpis(view, history, scoped)
-      + '<section class="history-grid" aria-label="History analytics">'
-      + '<div class="history-column history-column-left">'
-      + renderHistoryChart('Activity, rolling 24 hours', 'Hourly observed events across the rolling 24-hour window, with red overlays for sanitized failure events.', history.activity_24h, 'history-24h')
-      + renderHistoryChart('Activity, last 7 days', 'Daily observed events across the privacy-safe scanner window.', history.activity_7d, 'history-7d')
-      + renderRankCard('Top tools', 'Most-used allowlisted tool names, capped by the backend.', history.top_tools, 'No tool usage is visible yet.', { paletteColors: true })
+    historyContent.innerHTML = '<section class="history-grid" aria-label="History analytics">'
+      + '<div class="history-column history-tools-region">'
+      + renderModelsCompact(history.model_mix)
+      + renderTopToolsCompact(history)
+      + renderSessionDistribution(history.recent_sessions)
       + '</div>'
-      + '<div class="history-column history-column-right">'
-      + renderRankCard('Models used', 'Turn-level models are counted when available; sessions fall back to the last observed model, including Unknown.', history.model_mix, 'No model-bearing activity is visible yet.', { paletteColors: true })
-      + renderRankCard('Event mix', 'Distribution by Mission Control category across observed events.', history.category_mix, 'No categorized events are visible yet.', { categoryColors: true, categoryLabels: true })
+      + '<div class="history-column history-chart-region">'
+      + renderHistoryChart('Activity, rolling 24 hours', 'Hourly observed events across the rolling 24-hour window', history.activity_24h, 'history-24h')
+      + renderHistoryChart('Activity, last 7 days', 'Daily activity over the last 7 days', history.activity_7d, 'history-7d')
+      + '</div>'
+      + '<div class="history-column history-breakdown-region">'
+      + renderActivityBreakdown(history)
+      + '</div>'
+      + '<div class="history-column history-column-middle history-sessions-region">'
       + renderHistorySessions(history.recent_sessions)
+      + '</div>'
+      + '<div class="history-column history-column-right history-failures-region">'
       + renderHistoryFailures(history.recent_failures)
       + '</div>'
       + '</section>';
@@ -2019,6 +2119,13 @@
     lastDashboard = view;
     document.body.classList.add('dashboard-ready');
     requestDashboardSplashHide();
+    if (appRoute === 'history') {
+      renderHistory(view);
+      updateLiveFingerprints(view);
+      if (attentionOverlay && attentionOverlay.classList.contains('visible')) renderAttentionDialog(view.attention);
+      maybeShowSchemaDrift(view);
+      return;
+    }
     var l = view.layout || {};
     var hideSides = !!view.panelsHidden;
     var columnGap = l.compact ? 10 : 12;
@@ -2032,8 +2139,8 @@
     }
     setPanelRect(domSession, { x: l.leftX, y: l.topY, w: l.panelW });
     renderSession(view);
-    var naturalSessionH = domSession ? Math.ceil(domSession.getBoundingClientRect().height) : 0;
-    var sessionMainH = Math.max(0, Math.min(naturalSessionH || maxSessionH, maxSessionH));
+    var naturalSessionH = naturalPanelHeight(domSession, l.compact ? 140 : 160);
+    var sessionMainH = Math.max(0, Math.min(naturalSessionH, maxSessionH));
     var feedY = (l.topY || 0) + sessionMainH + columnGap;
     var feedH = Math.max(80, columnBottom - feedY);
     setPanelRect(domSession, { x: l.leftX, y: l.topY, w: l.panelW, h: sessionMainH });

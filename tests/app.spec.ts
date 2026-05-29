@@ -19,6 +19,28 @@ test.describe('Copilot Mission Control app shell', () => {
     await expect(page.locator('#history-route-btn svg')).toBeVisible();
     await expect(page.locator('#reset-btn svg')).toBeVisible();
     await expect(page.locator('#topbar-controls')).not.toContainText(/Home|History|Reset/);
+    const topbarIconStyles = await page.evaluate(() => {
+      const routeGroup = document.querySelector('.topbar-route-group') as HTMLElement;
+      const missionRoute = document.querySelector('#mission-route-btn') as HTMLElement;
+      const resetSvg = document.querySelector('#reset-btn svg') as SVGElement;
+      const resetPaths = Array.from(document.querySelectorAll('#reset-btn svg path')).map((path) => path.getAttribute('d'));
+      const routeGroupStyle = getComputedStyle(routeGroup);
+      const missionRouteStyle = getComputedStyle(missionRoute);
+      return {
+        routeGroupBorderWidth: routeGroupStyle.borderTopWidth,
+        routeBorderColor: missionRouteStyle.borderTopColor,
+        routeBoxShadow: missionRouteStyle.boxShadow,
+        resetIconWidth: getComputedStyle(resetSvg).width,
+        resetPaths,
+      };
+    });
+    expect(topbarIconStyles).toEqual({
+      routeGroupBorderWidth: '0px',
+      routeBorderColor: 'rgba(0, 0, 0, 0)',
+      routeBoxShadow: 'none',
+      resetIconWidth: '18px',
+      resetPaths: ['M5 12a7 7 0 1 0 2.1-5', 'M5 4v4.7h4.7'],
+    });
   });
 
   test('theme toggle persists to localStorage and flips body class', async ({ page }) => {

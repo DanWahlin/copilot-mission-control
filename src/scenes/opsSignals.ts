@@ -1,4 +1,4 @@
-import type { CopilotActivity, CopilotEventSummary, CopilotSessionSummary } from './missionTypes.js';
+import type { CopilotActivity, CopilotSessionSummary } from './missionTypes.js';
 
 export type AttentionSeverity = 'critical' | 'review' | 'watch' | 'info';
 export type AttentionConfidence = 'direct' | 'derived' | 'informational';
@@ -97,7 +97,7 @@ export function buildOpsSummary(activity: CopilotActivity): OpsSummary {
 }
 
 export function errorOrReview(session: CopilotSessionSummary) {
-  return session.status === 'needs-attention' || session.error_count > 0;
+  return session.status === 'needs-attention';
 }
 
 export function providerAttentionAlerts(activity: CopilotActivity): string[] {
@@ -107,10 +107,6 @@ export function providerAttentionAlerts(activity: CopilotActivity): string[] {
 }
 
 export function buildAttentionItems(activity: CopilotActivity): AttentionSummary {
-  const sessions = activity.sessions ?? [];
-  const activeSessions = sessions.filter(session => session.is_active);
-  const activeIds = new Set(activeSessions.map(session => session.id));
-  const sessionById = new Map(sessions.map(session => [session.id, session]));
   const items: AttentionItem[] = [];
 
   if (!activity.available) {
@@ -149,53 +145,17 @@ export function buildAttentionItems(activity: CopilotActivity): AttentionSummary
     });
   });
 
-  for (const session of activeSessions) {
-    if (session.error_count <= 0) continue;
-    const label = attentionSessionLabel(session);
-    const count = session.error_count === 1 ? '1 recorded failure' : `${session.error_count} recorded failures`;
-    items.push({
-      id: `session-errors-${session.id}`,
-      severity: 'review',
-      confidence: 'derived',
-      source: 'session',
-      sessionId: session.id,
-      title: `${label} has failures to review`,
-      detail: `${count} from matched active tool or hook results. Terminal output and arguments stay private.`,
-      timestamp: session.last_event_timestamp || session.updated_at || undefined,
-      action: hasInspectableSessionRows(session) ? 'open-inspector' : 'select-session',
-    });
-  }
-
-  const sessionsWithDerivedErrors = new Set(activeSessions.filter(session => session.error_count > 0).map(session => session.id));
-  for (const event of activity.recent_events ?? []) {
-    if (event.success !== false || !activeIds.has(event.session_id) || sessionsWithDerivedErrors.has(event.session_id)) continue;
-    if (event.kind !== 'tool.execution_complete' && event.kind !== 'hook.end') continue;
-    const session = sessionById.get(event.session_id);
-    const source: AttentionSource = event.kind === 'hook.end' ? 'hook' : 'tool';
-    items.push({
-      id: `recent-failure-${source}-${event.session_id}-${stableAttentionIdPart(event.timestamp)}-${stableAttentionIdPart(event.tool)}`,
-      severity: 'review',
-      confidence: 'direct',
-      source,
-      sessionId: event.session_id,
-      title: source === 'hook' ? 'Recent hook failure recorded' : 'Recent tool failure recorded',
-      detail: `${attentionSessionLabel(session)} reported a failed ${source} completion. Review the session summary for safe details.`,
-      timestamp: event.timestamp || undefined,
-      action: session && hasInspectableSessionRows(session) ? 'open-inspector' : 'select-session',
-    });
-  }
-
   const sorted = dedupeAttentionItems(items).sort(compareAttentionItems);
   const highestSeverity = sorted[0]?.severity ?? 'info';
   return {
     count: sorted.length,
     highestSeverity,
     summary: sorted.length === 0
-      ? 'No attention needed'
+      ? 'No action needed'
       : sorted.length === 1
         ? '1 attention item'
         : `${sorted.length} attention items`,
-    empty: 'No attention needed. Monitoring signals are healthy.',
+    empty: 'No action needed. Monitored provider and schema signals are healthy.',
     items: sorted,
   };
 }
@@ -204,25 +164,6 @@ function detectConcreteOpsSignal(activity: CopilotActivity): OpsSummary | null {
   const events = activity.recent_events;
   const sessions = activity.sessions.filter(s => s.is_active);
   const activeIds = new Set(sessions.map(s => s.id));
-
-  const erroredActive = sessions.find(s => s.error_count > 0);
-  const lastFailure = events.find(e =>
-    e.kind === 'tool.execution_complete' && !e.success && activeIds.has(e.session_id)
-  );
-  if (erroredActive || lastFailure) {
-    const target = erroredActive
-      ?? sessions.find(s => s.id === lastFailure?.session_id)
-      ?? sessions[0];
-    const tool = target?.last_tool ?? lastFailure?.tool ?? 'tool';
-    const sessionLabel = target ? (target.title || target.id) : 'active session';
-    const ago = typeof target?.stale_seconds === 'number' ? ` ${formatAge(target.stale_seconds)} ago` : '';
-    return createOpsSummary(
-      'Needs review',
-      'review',
-      `${tool} failed${ago} in ${sessionLabel}`,
-      'Active session has one or more tool failures.',
-    );
-  }
 
   const trailing = events.slice(0, 10).filter(e => activeIds.has(e.session_id));
   const counts = new Map<string, number>();
@@ -269,15 +210,6 @@ function dominantWork(mix: WorkMixCounts) {
   return entries[0]?.[1] > 0 ? entries[0][0] : 'activity';
 }
 
-function hasInspectableSessionRows(session: CopilotSessionSummary): boolean {
-  return (session.recent_tool_calls ?? []).length > 0 || (session.recent_turns ?? []).length > 0;
-}
-
-function attentionSessionLabel(session: CopilotSessionSummary | undefined): string {
-  if (!session) return 'Active session';
-  return session.session_name || session.repository || session.title || session.id;
-}
-
 function stableAttentionIdPart(value: string): string {
   return (value || 'none').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'none';
 }
@@ -303,11 +235,4 @@ function compareAttentionItems(a: AttentionItem, b: AttentionItem): number {
 function eventTimestampMs(timestamp?: string): number | null {
   const t = Date.parse(timestamp ?? '');
   return Number.isNaN(t) ? null : t;
-}
-
-function formatAge(seconds?: number) {
-  if (seconds === undefined || Number.isNaN(seconds)) return 'unknown';
-  if (seconds < 60) return `${seconds}s`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
-  return `${Math.floor(seconds / 3600)}h`;
 }

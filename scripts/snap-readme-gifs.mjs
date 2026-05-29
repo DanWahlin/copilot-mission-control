@@ -148,7 +148,7 @@ async function recordSession({ panelsHidden, outGif, outFirstFrame }) {
     try { localStorage.setItem('cmc_muted', '1'); } catch (_) {}
   }, { fixture, panelsHidden });
 
-  await page.goto('http://localhost:4173/game/index.html');
+  await page.goto('http://localhost:4173/index.html');
   await page.waitForSelector('canvas', { timeout: 15000 });
   await page.waitForFunction(() => {
     const g = window.__phaserGame;

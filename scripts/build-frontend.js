@@ -16,18 +16,16 @@ const copyFile = (source, targetDir) => {
   fs.copyFileSync(fromRoot(source), path.join(resolvedTargetDir, path.basename(source)));
 };
 
-remove('dist/game');
-remove('dist/assets');
-remove('dist/docs');
+remove('dist');
 
 execFileSync(process.execPath, [require.resolve('typescript/bin/tsc'), '-p', 'tsconfig.renderer.json'], {
   cwd: root,
   stdio: 'inherit',
 });
 
-copyFile('src/game/index.html', 'dist/game');
-copyFile('src/game/hud.js', 'dist/game');
-copyFile('node_modules/phaser/dist/phaser.min.js', 'dist/game');
+copyFile('src/index.html', 'dist');
+copyFile('src/hud.js', 'dist');
+copyFile('node_modules/phaser/dist/phaser.min.js', 'dist');
 
 fs.cpSync(fromRoot('assets'), fromRoot('dist/assets'), { recursive: true });
 copyFile('docs/img/copilot-mission-control.webp', 'dist/docs/img');

@@ -180,7 +180,7 @@ async function getHistoryNumbers(page: Page) {
     const rowText = (selector: string) => Array.from(document.querySelectorAll(selector)).map((el) => (el.textContent || '').replace(/\s+/g, ' ').trim());
     return {
       kpis,
-      tokenValues: Array.from(document.querySelectorAll('#history-token-summary .history-token-value')).map((el) => (el.textContent || '').trim()),
+      tokenValues: Array.from(document.querySelectorAll('.history-token-kpi .history-kpi-value')).map((el) => (el.textContent || '').trim()),
       hourChartDesc: text('[data-history-card="history-24h"] desc'),
       weekChartDesc: text('[data-history-card="history-7d"] desc'),
       hourReadouts: chartReadouts('history-24h'),
@@ -480,8 +480,8 @@ test.describe('Copilot Mission Control — Startup', () => {
     expect(state!.sessionCount).toBe(3);
     expect(state!.quarterCount).toBe(9);
     expect(state!.scannedSessions).toBe(3);
-    expect(state!.opsAttention).toBe('review');
-    expect(state!.opsRecommendation).toMatch(/failed.*in /);
+    expect(state!.opsAttention).toBe('ok');
+    expect(state!.opsRecommendation).toContain('Reading source');
     expect(state!.selectedSessionId).toBe('beta4567');
     expect(state!.quarterCounts).toEqual({
       forge: 2,
@@ -526,23 +526,75 @@ test.describe('Copilot Mission Control — History', () => {
     await expect(page.locator('#game')).not.toBeVisible();
     await expect(page.locator('#dashboard-overlay')).not.toBeVisible();
     await expect(page.locator('#history-route-btn')).toHaveAttribute('aria-current', 'page');
-    await expect(page.locator('#history-title')).toHaveText('Mission Archive');
-    await expect(page.locator('#history-content')).toContainText('Sessions scanned');
+    await expect(page.locator('#history-title')).toHaveText('Copilot Mission Archive');
+    await expect(page.locator('.history-header')).toContainText('Sessions Scanned');
     await expect(page.locator('#history-content')).toContainText('184');
-    await expect(page.locator('.history-kpi').filter({ hasText: 'Sanitized events' })).toContainText('184');
-    await expect(page.locator('.history-kpi').filter({ hasText: 'Tool calls' })).toContainText('47');
-    await expect(page.locator('#history-token-summary')).toContainText('3,300');
-    await expect(page.locator('#history-token-summary')).toContainText('8,120');
+    await expect(page.locator('.history-kpi').filter({ hasText: 'Events' })).toContainText('184');
+    await expect(page.locator('.history-kpi').filter({ hasText: 'Tool Calls' })).toContainText('47');
+    await expect(page.locator('.history-token-kpi').filter({ hasText: 'Input Tokens' })).toContainText('3,300');
+    await expect(page.locator('.history-token-kpi').filter({ hasText: 'Output Tokens' })).toContainText('8,120');
+    await expect(page.locator('#history-token-summary')).toHaveCount(0);
     await expect(page.locator('#history-session-filter')).toContainText('Build Mission Control · alpha123');
-    await expect(page.locator('#history-content')).toContainText('sanitized failure events');
+    await expect(page.locator('#history-content')).toContainText('Failure rows intentionally exclude raw error details');
     await expect(page.locator('[data-history-card="history-24h"] svg.history-chart')).toBeVisible();
     await expect(page.locator('[data-history-card="history-7d"] svg.history-chart')).toBeVisible();
     await expect(page.locator('#history-content')).toContainText('Models used');
-    await expect(page.locator('#history-content')).toContainText('Event mix');
+    await expect(page.locator('#history-content')).toContainText('Activity Breakdown');
     await expect(page.locator('#history-content')).toContainText('Top tools');
     await expect(page.locator('#history-content')).toContainText('Failure history');
     await expect(page.locator('#history-content')).toContainText('Hooks · postToolUse');
     await expect(page.locator('#history-session-filter')).toHaveCSS('font-size', '14px');
+    const historyLayout = await page.evaluate(() => {
+      const grid = document.querySelector('.history-grid') as HTMLElement;
+      const chartRegion = document.querySelector('.history-chart-region') as HTMLElement;
+      const chartCards = Array.from(chartRegion.querySelectorAll<HTMLElement>('.history-card')).map((card) => card.getBoundingClientRect());
+      const breakdown = document.querySelector('.history-breakdown-region') as HTMLElement;
+      const models = document.querySelector('[data-history-card="models-used"]') as HTMLElement;
+      const topTools = document.querySelector('[data-history-card="top-tools"]') as HTMLElement;
+      const distribution = document.querySelector('[data-history-card="session-distribution"]') as HTMLElement;
+      const sessions = document.querySelector('.history-sessions-region') as HTMLElement;
+      const failures = document.querySelector('.history-failures-region') as HTMLElement;
+      const gridStyle = window.getComputedStyle(grid);
+      const gridRect = grid.getBoundingClientRect();
+      const chartRect = chartRegion.getBoundingClientRect();
+      const breakdownRect = breakdown.getBoundingClientRect();
+      const modelsRect = models.getBoundingClientRect();
+      const topToolsRect = topTools.getBoundingClientRect();
+      const distributionRect = distribution.getBoundingClientRect();
+      return {
+        columns: gridStyle.gridTemplateColumns.split(' ').filter(Boolean).length,
+        chartLeft: Math.round(chartRect.left - gridRect.left),
+        chartWidth: Math.round(chartRect.width),
+        firstChartLeft: Math.round(chartCards[0].left),
+        secondChartLeft: Math.round(chartCards[1].left),
+        firstChartTop: Math.round(chartCards[0].top),
+        secondChartTop: Math.round(chartCards[1].top),
+        firstChartWidth: Math.round(chartCards[0].width),
+        breakdownLeft: Math.round(breakdownRect.left - gridRect.left),
+        breakdownWidth: Math.round(breakdownRect.width),
+        modelsLeft: Math.round(modelsRect.left - gridRect.left),
+        topToolsLeft: Math.round(topToolsRect.left - gridRect.left),
+        distributionLeft: Math.round(distributionRect.left - gridRect.left),
+        modelsTop: Math.round(modelsRect.top),
+        topToolsTop: Math.round(topToolsRect.top),
+        distributionTop: Math.round(distributionRect.top),
+        sessionsLeft: Math.round(sessions.getBoundingClientRect().left),
+        failuresLeft: Math.round(failures.getBoundingClientRect().left),
+      };
+    });
+    expect(historyLayout.columns).toBe(3);
+    expect(historyLayout.chartLeft).toBeGreaterThan(0);
+    expect(historyLayout.firstChartWidth).toBeGreaterThan(historyLayout.chartWidth * 0.95);
+    expect(historyLayout.secondChartLeft).toBe(historyLayout.firstChartLeft);
+    expect(historyLayout.secondChartTop).toBeGreaterThan(historyLayout.firstChartTop);
+    expect(historyLayout.breakdownLeft).toBe(historyLayout.chartLeft);
+    expect(historyLayout.breakdownWidth).toBe(historyLayout.chartWidth);
+    expect(historyLayout.modelsLeft).toBe(0);
+    expect(historyLayout.topToolsLeft).toBe(0);
+    expect(historyLayout.distributionLeft).toBe(0);
+    expect(historyLayout.modelsTop).toBeLessThan(historyLayout.topToolsTop);
+    expect(historyLayout.topToolsTop).toBeLessThan(historyLayout.distributionTop);
+    expect(historyLayout.failuresLeft).toBeGreaterThan(historyLayout.sessionsLeft);
     const scrollbarStyles = await page.evaluate(() => {
       const selectors = [
         '#history-screen',
@@ -568,8 +620,8 @@ test.describe('Copilot Mission Control — History', () => {
     expect(new Set(scrollbarStyles.map(({ color }) => color)).size).toBe(1);
     expect(scrollbarStyles.find(({ selector }) => selector === '#history-screen')?.gutter).toContain('stable');
     const columnTops = await page.evaluate(() => {
-      const left = document.querySelector('.history-column-left .history-card');
-      const right = document.querySelector('.history-column-right .history-card');
+      const left = document.querySelector('.history-tools-region .history-card');
+      const right = document.querySelector('.history-chart-region .history-card');
       return {
         left: left?.getBoundingClientRect().top ?? 0,
         right: right?.getBoundingClientRect().top ?? 0,
@@ -577,21 +629,46 @@ test.describe('Copilot Mission Control — History', () => {
     });
     expect(Math.abs(columnTops.left - columnTops.right)).toBeLessThanOrEqual(1);
 
+    await page.evaluate(() => {
+      const sessionPanel = document.querySelector('#dom-session') as HTMLElement | null;
+      if (sessionPanel) sessionPanel.style.height = '900px';
+    });
     await page.locator('#mission-route-btn').click();
     await expect(page.locator('body')).not.toHaveClass(/history-route/);
     await expect(page).toHaveURL(/#mission$/);
     await expect(page.locator('#mission-route-btn')).toHaveAttribute('aria-current', 'page');
     await expect(page.locator('#game')).toBeVisible();
+    await expect(page.locator('#dashboard-overlay')).toBeVisible();
+    await page.waitForFunction(() => {
+      const sessionPanel = document.querySelector('#dom-session') as HTMLElement | null;
+      return !!sessionPanel && sessionPanel.getBoundingClientRect().height < 420;
+    });
+    const dashboardLayout = await page.evaluate(() => {
+      const rect = (selector: string) => {
+        const el = document.querySelector(selector) as HTMLElement | null;
+        if (!el) throw new Error(`missing ${selector}`);
+        const r = el.getBoundingClientRect();
+        return { top: r.top, bottom: r.bottom, height: r.height };
+      };
+      return {
+        session: rect('#dom-session'),
+        actions: rect('#dom-session .cmc-actions'),
+        feed: rect('#dom-feed'),
+      };
+    });
+    expect(dashboardLayout.session.height).toBeLessThan(420);
+    expect(dashboardLayout.session.bottom).toBeLessThanOrEqual(dashboardLayout.actions.bottom + 36);
+    expect(dashboardLayout.feed.top).toBeGreaterThanOrEqual(dashboardLayout.session.bottom + 8);
   });
 
   test('History session filter scopes charts, lists, and token summary', async ({ page }) => {
     await page.locator('#history-route-btn').click();
     await page.locator('#history-session-filter').selectOption('beta4567');
 
-    await expect(page.locator('#history-token-summary')).toContainText('1,200');
-    await expect(page.locator('#history-token-summary')).toContainText('2,920');
-    await expect(page.locator('.history-kpi').filter({ hasText: 'Sanitized events' })).toContainText('64');
-    await expect(page.locator('.history-kpi').filter({ hasText: 'Tool calls' })).toContainText('17');
+    await expect(page.locator('.history-token-kpi').filter({ hasText: 'Input Tokens' })).toContainText('1,200');
+    await expect(page.locator('.history-token-kpi').filter({ hasText: 'Output Tokens' })).toContainText('2,920');
+    await expect(page.locator('.history-kpi').filter({ hasText: 'Events' })).toContainText('64');
+    await expect(page.locator('.history-kpi').filter({ hasText: 'Tool Calls' })).toContainText('17');
     await expect(page.locator('#history-content')).toContainText('Review Tests');
     await expect(page.locator('#history-content')).toContainText('64 events');
     await expect(page.locator('#history-content')).toContainText('postToolUse');
@@ -611,8 +688,8 @@ test.describe('Copilot Mission Control — History', () => {
 
     await page.locator('#history-route-btn').click();
 
-    await expect(page.locator('.history-kpi').filter({ hasText: 'Sanitized events' })).toContainText('184');
-    await expect(page.locator('.history-kpi').filter({ hasText: 'Tool calls' })).toContainText('47');
+    await expect(page.locator('.history-kpi').filter({ hasText: 'Events' })).toContainText('184');
+    await expect(page.locator('.history-kpi').filter({ hasText: 'Tool Calls' })).toContainText('47');
   });
 
   test('History visible numbers match the underlying history payload', async ({ page }) => {
@@ -621,35 +698,40 @@ test.describe('Copilot Mission Control — History', () => {
     const all = await getHistoryNumbers(page);
     const allLastActivity = await expectedHistoryAge(page, MISSION_FIXTURE.history.last_activity_at);
     expect(all.kpis).toMatchObject({
-      'Sessions scanned': { value: '3', note: '2 active' },
-      'Sanitized events': { value: '184', note: 'observed scan data' },
-      'Tool calls': { value: '47', note: 'privacy-safe names' },
-      'Failures': { value: '2', note: 'sanitized failure events' },
-      'Last activity': { value: allLastActivity, note: '3 recent sessions' },
+      'Sessions Scanned': { value: '3', note: '' },
+      'Events': { value: '184', note: '' },
+      'Tool Calls': { value: '47', note: '' },
+      'Models Used': { value: '2', note: '' },
+      'Last Activity': { value: allLastActivity, note: '' },
+      'Input Tokens': { value: '3,300', note: '' },
+      'Output Tokens': { value: '8,120', note: '' },
     });
     expect(all.tokenValues).toEqual(['3,300', '8,120']);
-    expect(all.hourChartDesc).toBe('184 events and 2 failures across observed buckets.');
-    expect(all.weekChartDesc).toBe('326 events and 3 failures across observed buckets.');
+    expect(all.hourChartDesc).toBe('184 events across observed buckets.');
+    expect(all.weekChartDesc).toBe('326 events across observed buckets.');
     expect(all.hourReadouts).toEqual([
-      'Hour 00: 12 events, 0 failures, 1 sessions',
-      'Hour 08: 31 events, 1 failures, 2 sessions',
-      'Hour 16: 54 events, 0 failures, 2 sessions',
-      'Hour 24: 87 events, 1 failures, 3 sessions',
+      'Hour 00: 12 events, 1 sessions',
+      'Hour 08: 31 events, 2 sessions',
+      'Hour 16: 54 events, 2 sessions',
+      'Hour 24: 87 events, 3 sessions',
     ]);
     expect(all.weekReadouts).toEqual([
-      'Mon: 42 events, 0 failures, 1 sessions',
-      'Tue: 61 events, 1 failures, 2 sessions',
-      'Wed: 39 events, 0 failures, 2 sessions',
-      'Thu: 184 events, 2 failures, 3 sessions',
+      'Mon: 42 events, 1 sessions',
+      'Tue: 61 events, 2 sessions',
+      'Wed: 39 events, 2 sessions',
+      'Thu: 184 events, 3 sessions',
     ]);
     expect(all.topTools).toEqual(['view=14 · 29.8%', 'apply_patch=8 · 17%', 'bash=7 · 14.9%']);
     expect(all.models).toEqual(['gpt-5.5=6 · 75%', 'unknown=2 · 25%']);
     expect(all.eventMix).toEqual(['Reads=18 · 39.1%', 'Edits=10 · 21.7%', 'Hooks=5 · 10.9%', 'Failures=2 · 4.3%']);
     expect(all.sessionRows).toEqual([
-      expect.stringContaining('82 events · 0 failures'),
-      expect.stringContaining('64 events · 2 failures'),
-      expect.stringContaining('38 events · 0 failures'),
+      expect.stringContaining('82 events'),
+      expect.stringContaining('64 events'),
+      expect.stringContaining('38 events'),
     ]);
+    for (const sessionRow of all.sessionRows) {
+      expect(sessionRow).not.toContain('failures');
+    }
     expect(all.failureRows).toEqual([
       expect.stringContaining('Failures · bash'),
       expect.stringContaining('Hooks · postToolUse'),
@@ -659,28 +741,31 @@ test.describe('Copilot Mission Control — History', () => {
     const beta = await getHistoryNumbers(page);
     const betaLastActivity = await expectedHistoryAge(page, MISSION_FIXTURE.history.session_scopes[1].last_activity_at);
     expect(beta.kpis).toMatchObject({
-      'Sessions scanned': { value: '1', note: 'selected session' },
-      'Sanitized events': { value: '64', note: 'observed scan data' },
-      'Tool calls': { value: '17', note: 'privacy-safe names' },
-      'Failures': { value: '2', note: 'sanitized failure events' },
-      'Last activity': { value: betaLastActivity, note: '1 recent sessions' },
+      'Sessions Scanned': { value: '1', note: '' },
+      'Events': { value: '64', note: '' },
+      'Tool Calls': { value: '17', note: '' },
+      'Models Used': { value: '1', note: '' },
+      'Last Activity': { value: betaLastActivity, note: '' },
+      'Input Tokens': { value: '1,200', note: '' },
+      'Output Tokens': { value: '2,920', note: '' },
     });
     expect(beta.tokenValues).toEqual(['1,200', '2,920']);
-    expect(beta.hourChartDesc).toBe('90 events and 2 failures across observed buckets.');
-    expect(beta.weekChartDesc).toBe('90 events and 3 failures across observed buckets.');
+    expect(beta.hourChartDesc).toBe('90 events across observed buckets.');
+    expect(beta.weekChartDesc).toBe('90 events across observed buckets.');
     expect(beta.hourReadouts).toEqual([
-      'Hour 00: 19 events, 1 failures, 1 sessions',
-      'Hour 12: 30 events, 0 failures, 1 sessions',
-      'Hour 24: 41 events, 1 failures, 1 sessions',
+      'Hour 00: 19 events, 1 sessions',
+      'Hour 12: 30 events, 1 sessions',
+      'Hour 24: 41 events, 1 sessions',
     ]);
     expect(beta.weekReadouts).toEqual([
-      'Tue: 45 events, 1 failures, 1 sessions',
-      'Thu: 45 events, 2 failures, 1 sessions',
+      'Tue: 45 events, 1 sessions',
+      'Thu: 45 events, 1 sessions',
     ]);
     expect(beta.topTools).toEqual(['bash=7 · 63.6%', 'postToolUse=4 · 36.4%']);
     expect(beta.models).toEqual(['gpt-5.5=2 · 100%']);
     expect(beta.eventMix).toEqual(['Commands=8 · 57.1%', 'Hooks=4 · 28.6%', 'Failures=2 · 14.3%']);
-    expect(beta.sessionRows).toEqual([expect.stringContaining('64 events · 2 failures')]);
+    expect(beta.sessionRows).toEqual([expect.stringContaining('64 events')]);
+    expect(beta.sessionRows[0]).not.toContain('failures');
     expect(beta.failureRows).toEqual([
       expect.stringContaining('Failures · bash'),
       expect.stringContaining('Hooks · postToolUse'),
@@ -694,7 +779,7 @@ test.describe('Copilot Mission Control — History', () => {
       fixture.history.recent_sessions = Array.from({ length: 14 }, (_, index) => ({
         ...baseSession,
         id: `session-${index}`,
-        title: `Session ${index + 1}`,
+        title: index === 0 ? 'Investigate Extremely Long Recent Session Title That Must Truncate Consistently' : `Session ${index + 1}`,
         event_count: 40 + index,
         updated_at: `2026-05-21T07:${String(index).padStart(2, '0')}:00Z`,
       }));
@@ -717,13 +802,61 @@ test.describe('Copilot Mission Control — History', () => {
         failuresScrolls: failures.scrollHeight > failures.clientHeight,
         sessionsMaxHeight: getComputedStyle(sessions).maxHeight,
         failuresMaxHeight: getComputedStyle(failures).maxHeight,
+        sessionRows: Array.from(document.querySelectorAll('.history-session-row')).slice(0, 4).map((row) => {
+          const rowEl = row as HTMLElement;
+          const badge = row.querySelector('.history-dossier-id') as HTMLElement;
+          const status = row.querySelector('.history-status') as HTMLElement;
+          const title = row.querySelector('.history-row-title') as HTMLElement;
+          const subtitle = row.querySelector('.history-row-sub') as HTMLElement;
+          const stats = row.querySelector('.history-session-stats') as HTMLElement;
+          const age = row.querySelector('.history-session-age') as HTMLElement;
+          const badgeRect = badge.getBoundingClientRect();
+          const statusRect = status.getBoundingClientRect();
+          const titleRect = title.getBoundingClientRect();
+          const statsRect = stats.getBoundingClientRect();
+          const ageRect = age.getBoundingClientRect();
+          const titleStyle = getComputedStyle(title);
+          return {
+            rowHeight: Math.round(rowEl.getBoundingClientRect().height),
+            badgeWidth: Math.round(badgeRect.width),
+            badgeHeight: Math.round(badgeRect.height),
+            badgeLeft: Math.round(badgeRect.left),
+            ageLeft: Math.round(ageRect.left),
+            statsLeft: Math.round(statsRect.left),
+            statusWidth: Math.round(statusRect.width),
+            titleLeft: Math.round(titleRect.left),
+            titleWidth: Math.round(titleRect.width),
+            subtitleText: subtitle.textContent || '',
+            ageText: age.textContent || '',
+            statsText: stats.textContent || '',
+            titleOverflow: titleStyle.textOverflow,
+            titleWhiteSpace: titleStyle.whiteSpace,
+            titleTooltip: title.getAttribute('title'),
+          };
+        }),
       };
     });
-    expect(listSizing).toEqual({
-      sessionsScrolls: true,
-      failuresScrolls: true,
-      sessionsMaxHeight: '560px',
-      failuresMaxHeight: '560px',
+    expect(listSizing.sessionsScrolls).toBe(true);
+    expect(listSizing.failuresScrolls).toBe(true);
+    expect(listSizing.sessionsMaxHeight).toBe('560px');
+    expect(listSizing.failuresMaxHeight).toBe('560px');
+    expect(new Set(listSizing.sessionRows.map((row) => row.rowHeight)).size).toBe(1);
+    expect(new Set(listSizing.sessionRows.map((row) => row.badgeWidth)).size).toBe(1);
+    expect(new Set(listSizing.sessionRows.map((row) => row.badgeHeight)).size).toBe(1);
+    expect(new Set(listSizing.sessionRows.map((row) => row.statusWidth)).size).toBe(1);
+    expect(new Set(listSizing.sessionRows.map((row) => row.titleLeft)).size).toBe(1);
+    expect(listSizing.sessionRows[0].rowHeight).toBeLessThan(82);
+    expect(listSizing.sessionRows[0].badgeWidth).toBeLessThan(90);
+    expect(listSizing.sessionRows[0].ageLeft).toBe(listSizing.sessionRows[0].titleLeft);
+    expect(listSizing.sessionRows[0].statsLeft).toBeGreaterThan(listSizing.sessionRows[0].ageLeft);
+    expect(listSizing.sessionRows[0].titleWidth).toBeGreaterThan(220);
+    expect(listSizing.sessionRows[0].subtitleText).not.toContain('session-0');
+    expect(listSizing.sessionRows[0].ageText).toContain(' · 40 events');
+    expect(listSizing.sessionRows[0].statsText).toBe('40 events');
+    expect(listSizing.sessionRows[0]).toMatchObject({
+      titleOverflow: 'ellipsis',
+      titleWhiteSpace: 'nowrap',
+      titleTooltip: 'Investigate Extremely Long Recent Session Title That Must Truncate Consistently',
     });
 
     const firstFailure = page.locator('.history-failure-item').first();
@@ -782,7 +915,7 @@ test.describe('Copilot Mission Control — History', () => {
 
     await page.locator('#history-route-btn').click();
     await expect(page.locator('#history-content')).toContainText('No observed Copilot events are available yet');
-    await expect(page.locator('#history-content')).toContainText('Sessions scanned');
+    await expect(page.locator('.history-header')).toContainText('Sessions Scanned');
   });
 
   test('History chart colors resolve in light theme', async ({ page }) => {
@@ -791,10 +924,10 @@ test.describe('Copilot Mission Control — History', () => {
 
     await expect(page.locator('body')).toHaveClass(/theme-light/);
     await page.locator('[data-history-card="history-24h"] rect.activity[data-history-readout]').nth(1).hover();
-    await expect(page.locator('[data-history-card="history-24h"] .history-chart-readout')).toContainText('Hour 08: 31 events, 1 failures, 2 sessions');
+    await expect(page.locator('[data-history-card="history-24h"] .history-chart-readout')).toContainText('Hour 08: 31 events, 2 sessions');
     await expect(page.locator('[data-history-card="history-24h"] .history-chart-readout')).toHaveClass(/visible/);
-    const hourAxisLabels = await page.locator('[data-history-card="history-24h"] svg.history-chart text').allTextContents();
-    expect(hourAxisLabels).toEqual(['00', '08', '16', '24']);
+    const hourAxisLabels = await page.locator('[data-history-card="history-24h"] .history-chart-axis span').allTextContents();
+    expect(hourAxisLabels).toEqual(['0', '8', '16', '24']);
     expect(hourAxisLabels.join(' ')).not.toContain('Z');
     const readout = await page.evaluate(() => {
       const card = document.querySelector('[data-history-card="history-24h"]') as HTMLElement;
@@ -810,23 +943,59 @@ test.describe('Copilot Mission Control — History', () => {
     const colors = await page.evaluate(() => {
       const screen = document.querySelector('#history-screen') as HTMLElement;
       const activity = document.querySelector('[data-history-card="history-24h"] rect.activity') as SVGElement;
-      const failure = document.querySelector('[data-history-card="history-24h"] rect.failure') as SVGElement;
       const activityFills = new Set(Array.from(document.querySelectorAll('[data-history-card="history-24h"] rect.activity')).map((el) => getComputedStyle(el).fill));
+      const panelTitle = document.querySelector('.cmc-panel-title') as HTMLElement;
+      const historyTitle = document.querySelector('[data-history-card="models-used"] .history-card-title') as HTMLElement;
+      const legendItems = Array.from(document.querySelectorAll('[data-history-card="history-24h"] .history-legend span')).map((el) => (el.textContent || '').trim());
+      const panelTitleStyle = getComputedStyle(panelTitle);
+      const historyTitleStyle = getComputedStyle(historyTitle);
+      const kpis = document.querySelector('.history-kpis') as HTMLElement;
+      const historyHeader = document.querySelector('.history-header') as HTMLElement;
+      const historyFilter = document.querySelector('.history-filter') as HTMLElement;
+      const rowBgProbe = document.createElement('span');
+      rowBgProbe.style.color = 'var(--history-row-bg)';
+      screen.appendChild(rowBgProbe);
+      const rowBgColor = getComputedStyle(rowBgProbe).color;
+      rowBgProbe.remove();
       return {
         activityVar: getComputedStyle(screen).getPropertyValue('--history-activity').trim(),
-        failureVar: getComputedStyle(screen).getPropertyValue('--history-failure').trim(),
         activityFill: getComputedStyle(activity).fill,
-        failureFill: getComputedStyle(failure).fill,
         activityFillCount: activityFills.size,
+        failureRects: document.querySelectorAll('[data-history-card="history-24h"] rect.failure').length,
+        legendItems,
+        titleStylesMatch: {
+          backgroundImage: historyTitleStyle.backgroundImage === panelTitleStyle.backgroundImage,
+          color: historyTitleStyle.color === panelTitleStyle.color,
+          fontSize: historyTitleStyle.fontSize === panelTitleStyle.fontSize,
+          height: historyTitleStyle.height === panelTitleStyle.height,
+        },
+        kpiStripInHeader: historyHeader.contains(kpis),
+        kpiWidthRatio: kpis.getBoundingClientRect().width / historyHeader.getBoundingClientRect().width,
+        kpiSurfaceUsesRowBackground: getComputedStyle(kpis).backgroundColor === rowBgColor,
+        filterBorderWidth: getComputedStyle(historyFilter).borderTopWidth,
+        filterBackground: getComputedStyle(historyFilter).backgroundColor,
       };
     });
     expect(colors).toEqual({
       activityVar: '#0f63ce',
-      failureVar: '#dc2626',
       activityFill: 'rgb(15, 99, 206)',
-      failureFill: 'rgb(220, 38, 38)',
       activityFillCount: 1,
+      failureRects: 0,
+      legendItems: ['Events'],
+      titleStylesMatch: {
+        backgroundImage: true,
+        color: true,
+        fontSize: true,
+        height: true,
+      },
+      kpiStripInHeader: true,
+      kpiWidthRatio: expect.any(Number),
+      kpiSurfaceUsesRowBackground: true,
+      filterBorderWidth: '0px',
+      filterBackground: 'rgba(0, 0, 0, 0)',
     });
+    expect(colors.kpiWidthRatio).toBeGreaterThan(0.92);
+    expect(colors.kpiWidthRatio).toBeLessThanOrEqual(1);
   });
 
   test('History remains usable on narrow viewports', async ({ page }) => {
@@ -1046,6 +1215,26 @@ test.describe('Copilot Mission Control — Dashboard', () => {
     expect(pillTops).toHaveLength(4);
     expect(new Set(pillTops).size).toBe(4);
     expect(pillTops).toEqual([...pillTops].sort((a, b) => a - b));
+  });
+
+  test('selected session shows pending input tokens until usage summary is emitted', async ({ page }) => {
+    const fixture = JSON.parse(JSON.stringify(MISSION_FIXTURE));
+    fixture.sessions.forEach((session: any) => {
+      session.is_active = false;
+      session.status = 'idle';
+    });
+    const alpha = fixture.sessions.find((session: any) => session.id === 'alpha123');
+    alpha.input_tokens = 0;
+    alpha.output_tokens = 4200;
+    alpha.token_checkpoints = [];
+
+    await page.addInitScript((f) => {
+      (window as any).__missionControlFixture = f;
+    }, fixture);
+    await page.goto(GAME_URL);
+    await waitForGame(page);
+
+    await expect(page.locator('#dom-session .cmc-session-meta')).toContainText('Tokens in/out: pending / 4,200');
   });
 
   test('provider scan warnings appear in the selected session panel', async ({ page }) => {
@@ -1710,7 +1899,7 @@ test.describe('Copilot Mission Control — Dashboard', () => {
 });
 
 test.describe('Copilot Mission Control — Attention Center', () => {
-  test('renders a quiet empty state without adding feed clutter', async ({ page }) => {
+  test('keeps attention summary out of the selected session panel', async ({ page }) => {
     const fixture = {
       ...MISSION_FIXTURE,
       active_sessions: 1,
@@ -1726,8 +1915,9 @@ test.describe('Copilot Mission Control — Attention Center', () => {
     await page.goto(GAME_URL);
     await waitForGame(page);
 
-    await expect(page.locator('#dom-session .cmc-attention-entry')).toBeVisible();
-    await expect(page.locator('#dom-session .cmc-attention-summary')).toHaveText('No attention needed');
+    await expect(page.locator('#dom-session .cmc-attention-entry')).toHaveCount(0);
+    await expect(page.locator('#dom-session')).not.toContainText('Attention');
+    await expect(page.locator('#dom-session')).not.toContainText('No action needed');
     await expect(page.locator('#dom-session .cmc-attention-count')).toHaveCount(0);
     await expect(page.locator('#dom-session [data-cmc-action="attention-center"]')).toHaveCount(0);
     await expect(page.locator('#dom-feed')).not.toContainText('Attention');
@@ -1763,7 +1953,16 @@ test.describe('Copilot Mission Control — Attention Center', () => {
 
     await expect(page.locator('#schema-drift-overlay')).toHaveClass(/visible/);
     await page.locator('#schema-drift-close').click();
-    await page.locator('#dom-session [data-cmc-action="attention-center"]').click();
+    await expect(page.locator('#dom-session [data-cmc-action="attention-center"]')).toHaveCount(0);
+    await page.evaluate(() => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.dataset.cmcAction = 'attention-center';
+      button.style.display = 'none';
+      document.body.appendChild(button);
+      button.click();
+      button.remove();
+    });
     await expect(page.locator('#attention-body')).toContainText('Provider scan needs review');
     await expect(page.locator('#attention-body')).toContainText('Possible provider schema drift');
     await expect(page.locator('#attention-dialog')).toContainText('No prompts, tool arguments, command output, file paths, or diffs');
@@ -1774,34 +1973,16 @@ test.describe('Copilot Mission Control — Attention Center', () => {
     await expect(page.locator('#schema-drift-overlay')).toHaveClass(/visible/);
   });
 
-  test('opens the inspector from an active failure attention item', async ({ page }) => {
+  test('keeps generic active failures out of the attention center', async ({ page }) => {
     await page.addInitScript((fixture) => { (window as any).__missionControlFixture = fixture; }, inspectorFixture());
     await page.goto(GAME_URL);
     await waitForGame(page);
 
-    await expect(page.locator('#dom-session .cmc-attention-count')).toHaveText('1');
-    await page.locator('#dom-session [data-cmc-action="attention-center"]').click();
-    await expect(page.locator('#attention-body')).toContainText('Review Tests has failures to review');
-    await expect(page.locator('#attention-body')).toContainText('matched active tool or hook results');
-    await page.locator('#attention-body [data-attention-action="open-inspector"]').click();
-
-    await expect(page.locator('#attention-overlay')).not.toHaveClass(/visible/);
-    await expect(page.locator('#inspector-overlay')).toHaveClass(/visible/);
-    await expect(page.locator('#inspector-title')).toContainText('Review Tests');
-  });
-
-  test('selects the session when an attention item has no retained inspector rows', async ({ page }) => {
-    await installFixture(page);
-    await page.goto(GAME_URL);
-    await waitForGame(page);
-
-    await selectSession(page, 'alpha123');
-    await expect.poll(async () => (await getMissionState(page))!.selectedSessionId).toBe('alpha123');
-    await page.locator('#dom-session [data-cmc-action="attention-center"]').click();
-    await page.locator('#attention-body [data-attention-action="select-session"]').click();
-
-    await expect.poll(async () => (await getMissionState(page))!.selectedSessionId).toBe('beta4567');
-    await expect(page.locator('#attention-overlay')).not.toHaveClass(/visible/);
+    await expect(page.locator('#dom-session .cmc-attention-entry')).toHaveCount(0);
+    await expect(page.locator('#dom-session .cmc-attention-count')).toHaveCount(0);
+    await expect(page.locator('#dom-session [data-cmc-action="attention-center"]')).toHaveCount(0);
+    await expect(page.locator('#dom-session')).not.toContainText('No action needed');
+    await expect(page.locator('#dom-session')).not.toContainText('failures to review');
   });
 });
 

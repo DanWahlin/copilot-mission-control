@@ -3,8 +3,8 @@
     "target": "ES2022",
     "module": "ES2022",
     "moduleResolution": "bundler",
-    "outDir": "dist/game",
-    "rootDir": "src/game",
+    "outDir": "dist",
+    "rootDir": "src",
     "strict": true,
     "esModuleInterop": true,
     "isolatedModules": true,
@@ -14,5 +14,5 @@
     "sourceMap": true,
     "allowJs": false
   },
-  "include": ["src/game/**/*.ts"]
+  "include": ["src/**/*.ts"]
 }

@@ -84,9 +84,9 @@ declare global {
 }
 
 const SPACE_ATLAS_KEY = 'mc';
-const SPACE_ATLAS_ROOT = '../assets/space';
+const SPACE_ATLAS_ROOT = 'assets/space';
 const MEDIEVAL_ATLAS_KEY = 'medieval';
-const MEDIEVAL_ATLAS_ROOT = '../assets/medieval';
+const MEDIEVAL_ATLAS_ROOT = 'assets/medieval';
 
 type ThemeMode = 'dark' | 'light';
 type AppTheme = 'space' | 'medieval';
@@ -443,7 +443,7 @@ export class MissionControlScene extends Phaser.Scene {
     this.backdrop = this.add.graphics().setDepth(-100);
     this.redrawBackdrop();
     // Re-paint the backdrop when Phaser resizes (driven by the
-    // window `resize` listener in game.ts → scale.resize(W, H)).
+    // window `resize` listener in main.ts -> scale.resize(W, H)).
     this.scale.on('resize', () => this.redrawBackdrop());
     // Clean up scene-owned resources on shutdown so a future
     // reload/HMR doesn't leak handlers.
@@ -1308,15 +1308,8 @@ export class MissionControlScene extends Phaser.Scene {
     const border = Math.max(2, Math.round((focused ? 4 : 2) * s));
     const notch = Math.max(10, Math.round(13 * s));
     // Dark mode keeps the deep card so the sprites pop against the navy
-    // backdrop. Light mode uses a frosted card with a subtle shadow so the
-    // sectors feel anchored without competing with the colored halos.
-    if (theme.mode === 'light') {
-      this.map.fillStyle(0x9aa8bd, 0.14);
-      this.map.fillRect(px + 6 * s, py + 7 * s, pw, ph);
-      this.map.fillStyle(0xffffff, 0.68);
-      this.map.fillRect(px + notch, py, pw - notch * 2, ph);
-      this.map.fillRect(px, py + notch, pw, ph - notch * 2);
-    } else {
+    // backdrop. Light mode lets the app background show through.
+    if (theme.mode !== 'light') {
       this.map.fillStyle(0x020713, 0.5);
       this.map.fillRect(px + 7 * s, py + 8 * s, pw, ph);
       this.map.fillStyle(theme.panelBg, 0.94);

@@ -57,7 +57,7 @@ function startServer() {
 async function waitForServer() {
   for (let i = 0; i < 30; i++) {
     try {
-      await new Promise((res, rej) => http.get(`http://127.0.0.1:${PORT}/game/`, (r) => { r.resume(); r.statusCode === 200 ? res() : rej(); }).on('error', rej));
+      await new Promise((res, rej) => http.get(`http://127.0.0.1:${PORT}/`, (r) => { r.resume(); r.statusCode === 200 ? res() : rej(); }).on('error', rej));
       return;
     } catch { await new Promise((r) => setTimeout(r, 200)); }
   }
@@ -71,7 +71,7 @@ async function snap(browser, w, h, label, selectFirstSession, themeMode = 'dark'
     try { window.localStorage.setItem('cmc_theme', args.theme); } catch {}
   }, { fixture: FIXTURE, theme: themeMode });
   const page = await ctx.newPage();
-  await page.goto(`http://127.0.0.1:${PORT}/game/`);
+  await page.goto(`http://127.0.0.1:${PORT}/`);
   await page.waitForFunction(() => {
     const game = window.__phaserGame;
     if (!game) return false;

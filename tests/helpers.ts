@@ -8,7 +8,7 @@
 
 type Page = import('@playwright/test').Page;
 
-const GAME_URL = 'http://localhost:4173/game/index.html';
+const GAME_URL = 'http://localhost:4173/index.html';
 export { GAME_URL };
 
 /**

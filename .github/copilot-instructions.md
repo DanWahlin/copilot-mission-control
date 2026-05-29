@@ -20,7 +20,7 @@
 
 ## Scene Conventions
 
-There is **one** Phaser scene, `MissionControlScene`, in `src/game/scenes/MissionControl.ts`. It extends `Phaser.Scene` directly (no `BaseScene`).
+There is **one** Phaser scene, `MissionControlScene`, in `src/scenes/MissionControl.ts`. It extends `Phaser.Scene` directly (no `BaseScene`).
 
 - `create()` paints its own backdrop at depth `-100`, registers a `scale.resize` handler to repaint it, and listens for `shutdown` once to release timers/listeners/audio/graphics.
 - `window.__phaserGame` is set so Playwright can reach into the scene registry.

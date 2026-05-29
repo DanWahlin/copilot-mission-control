@@ -11,7 +11,7 @@
     "windows": [
       {
         "label": "main",
-        "url": "game/index.html",
+        "url": "index.html",
         "title": "Copilot Mission Control",
         "width": 1600,
         "height": 1000,

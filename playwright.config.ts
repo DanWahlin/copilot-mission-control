@@ -13,7 +13,7 @@ export default defineConfig({
   },
   webServer: {
     command: 'python3 -m http.server 4173 --directory dist',
-    url: 'http://localhost:4173/game/index.html',
+    url: 'http://localhost:4173/index.html',
     reuseExistingServer: true,
     timeout: 10_000,
   },

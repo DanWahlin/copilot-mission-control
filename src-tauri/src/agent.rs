@@ -22,6 +22,10 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{env, fs};
 
+use chrono::{
+    DateTime, Datelike, Duration as ChronoDuration, Local, LocalResult, NaiveDate, TimeZone,
+    Timelike, Utc,
+};
 use notify::{recommended_watcher, RecursiveMode, Watcher};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
@@ -407,6 +411,7 @@ pub fn default_providers() -> Vec<Box<dyn AgentProvider>> {
 // ── Top-level merge ───────────────────────────────────────────────────
 
 const MAX_SESSIONS: usize = 12;
+const MAX_SCANNED_SESSIONS: usize = 64;
 const MAX_TOOLS: usize = 10;
 const MAX_TOOLS_PER_CATEGORY: usize = 5;
 const ACTIVITY_CACHE_MAX_AGE_MS: u64 = 2_000;
@@ -422,12 +427,11 @@ const MAX_HISTORY_RECENT_SESSIONS: usize = 16;
 const MAX_HISTORY_RECENT_FAILURES: usize = 20;
 const HOUR_MS: u64 = 60 * 60 * 1000;
 const DAY_MS: u64 = 24 * HOUR_MS;
-/// Sessions whose `events.jsonl` has not been touched in this many
-/// seconds are considered stale "ghost" sessions and excluded from
+/// Sessions whose `events.jsonl` has not been touched within the visible
+/// history window are considered stale "ghost" sessions and excluded from
 /// the scan. Without this filter the user's accumulated session-state
-/// directory floods the picker with old runs that aren't relevant to
-/// what they're observing right now.
-const STALE_SESSION_CUTOFF_SECS: u64 = 24 * 60 * 60;
+/// directory floods the picker with old runs that are outside the archive.
+const STALE_SESSION_CUTOFF_SECS: u64 = HISTORY_DAY_BUCKETS as u64 * 24 * 60 * 60;
 /// Tool-call entries retained per session for the inspector transcript
 /// drill-down. Bumped from 20 → 120 so low-volume categories (Intent,
 /// Skills, Agents) survive bursts of high-volume categories (bash,
@@ -526,6 +530,16 @@ struct TokenEventSchema {
     input_components: Vec<String>,
     #[serde(default)]
     output_components: Vec<String>,
+    #[serde(default)]
+    model_metrics: Option<ModelMetricsTokenSchema>,
+}
+
+#[derive(serde::Deserialize, Clone)]
+struct ModelMetricsTokenSchema {
+    metrics_path: String,
+    input_path: String,
+    cache_read_path: String,
+    output_path: String,
 }
 
 #[derive(serde::Deserialize, Clone)]
@@ -1590,6 +1604,9 @@ fn build_history_buckets(
     if bucket_count == 0 || bucket_ms == 0 {
         return Vec::new();
     }
+    if bucket_ms >= DAY_MS {
+        return build_daily_history_buckets(events, generated_at_ms, bucket_count, &Local);
+    }
 
     let end_bucket_start = (generated_at_ms / bucket_ms) * bucket_ms;
     let first_bucket_start = end_bucket_start.saturating_sub((bucket_count as u64 - 1) * bucket_ms);
@@ -1632,6 +1649,77 @@ fn build_history_buckets(
         .map(|mut acc| {
             acc.bucket.active_sessions = acc.session_ids.len();
             acc.bucket
+        })
+        .collect()
+}
+
+struct DailyHistoryBucketBounds {
+    start_ms: u64,
+    end_ms: u64,
+    accumulator: HistoryBucketAccumulator,
+}
+
+fn build_daily_history_buckets<Tz: TimeZone>(
+    events: &[AgentEventSummary],
+    generated_at_ms: u64,
+    bucket_count: usize,
+    timezone: &Tz,
+) -> Vec<AgentHistoryBucket> {
+    let generated_utc = utc_datetime_from_ms(generated_at_ms).unwrap_or_else(Utc::now);
+    let end_date = generated_utc.with_timezone(timezone).date_naive();
+    let mut buckets: Vec<DailyHistoryBucketBounds> = (0..bucket_count)
+        .map(|i| {
+            let days_before_end = (bucket_count - 1 - i) as i64;
+            let bucket_date = end_date
+                .checked_sub_signed(ChronoDuration::days(days_before_end))
+                .unwrap_or(end_date);
+            let next_date = bucket_date
+                .checked_add_signed(ChronoDuration::days(1))
+                .unwrap_or(bucket_date);
+            let start = start_of_local_date(timezone, bucket_date);
+            let end = start_of_local_date(timezone, next_date);
+            DailyHistoryBucketBounds {
+                start_ms: datetime_to_unix_ms(&start),
+                end_ms: datetime_to_unix_ms(&end),
+                accumulator: HistoryBucketAccumulator {
+                    bucket: AgentHistoryBucket {
+                        start: format_local_bucket_start(&start),
+                        label: format_local_day_label(&start),
+                        ..Default::default()
+                    },
+                    session_ids: BTreeSet::new(),
+                },
+            }
+        })
+        .collect();
+
+    for event in events {
+        let Some(event_ms) = parse_iso_ms(&event.timestamp) else {
+            continue;
+        };
+        let Some(bucket) = buckets
+            .iter_mut()
+            .find(|bucket| event_ms >= bucket.start_ms && event_ms < bucket.end_ms)
+        else {
+            continue;
+        };
+        bucket.accumulator.bucket.event_count += 1;
+        if is_failure_event(event) {
+            bucket.accumulator.bucket.failure_count += 1;
+        }
+        if !event.session_id.is_empty() {
+            bucket
+                .accumulator
+                .session_ids
+                .insert(event.session_id.clone());
+        }
+    }
+
+    buckets
+        .into_iter()
+        .map(|mut bounded| {
+            bounded.accumulator.bucket.active_sessions = bounded.accumulator.session_ids.len();
+            bounded.accumulator.bucket
         })
         .collect()
 }
@@ -1842,6 +1930,45 @@ fn format_bucket_label(start_ms: u64, bucket_ms: u64) -> String {
     }
 }
 
+fn utc_datetime_from_ms(ms: u64) -> Option<DateTime<Utc>> {
+    if ms > i64::MAX as u64 {
+        return None;
+    }
+    Utc.timestamp_millis_opt(ms as i64).single()
+}
+
+fn start_of_local_date<Tz: TimeZone>(timezone: &Tz, date: NaiveDate) -> DateTime<Tz> {
+    let midnight = date
+        .and_hms_opt(0, 0, 0)
+        .expect("midnight is valid for a NaiveDate");
+    match timezone.from_local_datetime(&midnight) {
+        LocalResult::Single(dt) => dt,
+        LocalResult::Ambiguous(earliest, _) => earliest,
+        LocalResult::None => timezone.from_utc_datetime(&midnight),
+    }
+}
+
+fn datetime_to_unix_ms<Tz: TimeZone>(dt: &DateTime<Tz>) -> u64 {
+    dt.with_timezone(&Utc).timestamp_millis().max(0) as u64
+}
+
+fn format_local_bucket_start<Tz: TimeZone>(start: &DateTime<Tz>) -> String {
+    let utc = start.with_timezone(&Utc);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        utc.year(),
+        utc.month(),
+        utc.day(),
+        utc.hour(),
+        utc.minute(),
+        utc.second()
+    )
+}
+
+fn format_local_day_label<Tz: TimeZone>(start: &DateTime<Tz>) -> String {
+    format!("{:02}-{:02}", start.month(), start.day())
+}
+
 fn utc_parts_from_ms(ms: u64) -> (i64, i64, i64, i64) {
     let total_seconds = (ms / 1000) as i64;
     let days = total_seconds.div_euclid(86_400);
@@ -1992,8 +2119,8 @@ fn scan_copilot() -> ProviderScan {
         .collect::<Vec<(PathBuf, SystemTime)>>();
 
     session_dirs.sort_by(|a, b| b.1.cmp(&a.1));
-    // Cap per-provider scan effort but leave global truncation to the merger.
-    session_dirs.truncate(MAX_SESSIONS);
+    // Cap per-provider scan effort but leave visible session truncation to the merger.
+    session_dirs.truncate(MAX_SCANNED_SESSIONS);
     scan.scanned_sessions = session_dirs.len();
 
     // Load once per scan; reused for every tool execution event below.
@@ -3223,6 +3350,35 @@ fn sum_token_components(value: &serde_json::Value, paths: &[String]) -> u64 {
         .sum()
 }
 
+fn model_metrics_token_totals(
+    value: &serde_json::Value,
+    rule: &ModelMetricsTokenSchema,
+) -> (u64, u64) {
+    let Some(metrics) =
+        value_at_path(value, &rule.metrics_path).and_then(|value| value.as_object())
+    else {
+        return (0, 0);
+    };
+
+    metrics
+        .values()
+        .fold((0_u64, 0_u64), |(input_total, output_total), metric| {
+            let input = value_at_path(metric, &rule.input_path)
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+            let cache_read = value_at_path(metric, &rule.cache_read_path)
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+            let output = value_at_path(metric, &rule.output_path)
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+            (
+                input_total.saturating_add(input.saturating_sub(cache_read)),
+                output_total.saturating_add(output),
+            )
+        })
+}
+
 /// Apply the token deltas from a single `session.compaction_complete`
 /// or `session.shutdown` event to `summary`.
 ///
@@ -3234,15 +3390,17 @@ fn sum_token_components(value: &serde_json::Value, paths: &[String]) -> u64 {
 ///
 /// **Shutdown**: Copilot emits cumulative session totals in a four-
 /// bucket `tokenDetails` block (input / cache_read / cache_write /
-/// output). We deliberately EXCLUDE `cache_read.tokenCount` from the
-/// input total: cache reads are the cached prefix the model re-fetches
-/// on every turn, which can balloon into the hundreds of millions for
-/// a long session (one observed session reported 321M cache reads vs
-/// 125K fresh input and 10M cache writes). Including cache reads made
-/// the "Tokens · 24h" card report ~333M for a normal day of coding,
-/// which both overflowed the card and misrepresented actual model work.
-/// Cache reads are billed at a tiny fraction of fresh-input rates and
-/// the model doesn't process them from scratch.
+/// output). Newer shutdown events may instead expose only per-model
+/// `modelMetrics.*.usage` totals; we treat those as the same cumulative
+/// source. We deliberately EXCLUDE cache reads from the input total:
+/// cache reads are the cached prefix the model re-fetches on every turn,
+/// which can balloon into the hundreds of millions for a long session
+/// (one observed session reported 321M cache reads vs 125K fresh input
+/// and 10M cache writes). Including cache reads made the "Tokens · 24h"
+/// card report ~333M for a normal day of coding, which both overflowed
+/// the card and misrepresented actual model work. Cache reads are billed
+/// at a tiny fraction of fresh-input rates and the model doesn't process
+/// them from scratch.
 ///
 /// We DO include `cache_write` because cache writes are the model
 /// committing new content to cache and are billed at the same (or
@@ -3266,8 +3424,17 @@ fn apply_token_event(
         return;
     };
 
-    let input = sum_token_components(value, &rule.input_components);
-    let output = sum_token_components(value, &rule.output_components);
+    let mut input = sum_token_components(value, &rule.input_components);
+    let mut output = sum_token_components(value, &rule.output_components);
+    if rule.mode == "cumulative_max" {
+        let (model_input, model_output) = rule
+            .model_metrics
+            .as_ref()
+            .map(|model_rule| model_metrics_token_totals(value, model_rule))
+            .unwrap_or((0, 0));
+        input = input.max(model_input);
+        output = output.max(model_output);
+    }
     match rule.mode.as_str() {
         "additive" => {
             summary.input_tokens += input;
@@ -3787,6 +3954,7 @@ fn is_relevant_path(path: &Path, relevant_files: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::FixedOffset;
 
     fn test_schema() -> ProviderSchema {
         parse_provider_schema(BUNDLED_COPILOT_SCHEMA).expect("bundled schema")
@@ -3796,7 +3964,7 @@ mod tests {
     fn bundled_provider_schema_parses_and_validates() {
         let schema = test_schema();
         assert_eq!(schema.provider, "copilot");
-        assert_eq!(schema.schema_version, "1.2.0");
+        assert_eq!(schema.schema_version, "1.2.1");
         assert!(schema
             .session
             .relevant_files
@@ -3806,11 +3974,11 @@ mod tests {
 
     #[test]
     fn published_provider_schema_matches_bundled_schema() {
-        let published = include_str!("../../docs/provider-schemas/copilot/1.2.0.json");
+        let published = include_str!("../../docs/provider-schemas/copilot/1.2.1.json");
         assert_eq!(published, BUNDLED_COPILOT_SCHEMA);
         assert_eq!(
             sha256_hex(published),
-            "b4fd6f3484bd4ee7b51ab9cdd34d73b3da34fc56f1157e50ee0f85deafddaa8b"
+            "7ee6f870a9ea31656b23fd518902faf772d53ce2fdbce3320c2282dccc0bf667"
         );
     }
 
@@ -4178,7 +4346,11 @@ mod tests {
 
         assert_eq!(history.activity_24h.len(), HISTORY_HOUR_BUCKETS);
         assert_eq!(
-            history.activity_24h.first().expect("first hour bucket").start,
+            history
+                .activity_24h
+                .first()
+                .expect("first hour bucket")
+                .start,
             "2026-05-27T13:00:00Z"
         );
         assert_eq!(current_hour.start, "2026-05-28T12:00:00Z");
@@ -4194,8 +4366,9 @@ mod tests {
     }
 
     #[test]
-    fn history_daily_buckets_aggregate_observed_events() {
-        let generated_at_ms = parse_iso_ms("2026-05-28T12:34:00Z").expect("valid fixture time");
+    fn history_daily_buckets_aggregate_observed_events_by_local_day() {
+        let timezone = FixedOffset::west_opt(7 * 60 * 60).expect("PDT offset");
+        let generated_at_ms = parse_iso_ms("2026-05-29T05:53:00Z").expect("valid fixture time");
         let events = vec![
             history_event(
                 "alpha123",
@@ -4207,7 +4380,7 @@ mod tests {
             ),
             history_event(
                 "beta4567",
-                "2026-05-28T00:01:00Z",
+                "2026-05-29T05:30:00Z",
                 "tool.execution_complete",
                 "bash",
                 "terminal",
@@ -4215,18 +4388,19 @@ mod tests {
             ),
         ];
 
-        let history = build_history_summary(&[], &events, &[], generated_at_ms);
-        let may_26 = history
-            .activity_7d
+        let buckets =
+            build_daily_history_buckets(&events, generated_at_ms, HISTORY_DAY_BUCKETS, &timezone);
+        let may_26 = buckets
             .iter()
-            .find(|bucket| bucket.start == "2026-05-26T00:00:00Z")
+            .find(|bucket| bucket.label == "05-26")
             .expect("May 26 bucket");
-        let may_28 = history.activity_7d.last().expect("current day bucket");
+        let may_28 = buckets.last().expect("current local day bucket");
 
-        assert_eq!(history.activity_7d.len(), HISTORY_DAY_BUCKETS);
+        assert_eq!(buckets.len(), HISTORY_DAY_BUCKETS);
         assert_eq!(may_26.event_count, 1);
         assert_eq!(may_26.failure_count, 0);
-        assert_eq!(may_28.start, "2026-05-28T00:00:00Z");
+        assert_eq!(may_28.label, "05-28");
+        assert_eq!(may_28.start, "2026-05-28T07:00:00Z");
         assert_eq!(may_28.event_count, 1);
         assert_eq!(may_28.failure_count, 1);
     }
@@ -4877,6 +5051,59 @@ mod tests {
         assert_eq!(summary.token_checkpoints[1].output_tokens, 2_000_000);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn shutdown_model_metrics_supply_tokens_when_top_level_details_missing() {
+        use std::io::Write;
+        let mut path = std::env::temp_dir();
+        path.push("cmc_test_shutdown_model_metrics_tokens.jsonl");
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut f = std::fs::File::create(&path).expect("create temp jsonl");
+            writeln!(
+                f,
+                r#"{{"type":"session.shutdown","timestamp":"2026-01-01T00:01:00Z","data":{{"modelMetrics":{{"claude-opus-4.6":{{"usage":{{"inputTokens":31477746,"cacheReadTokens":30035719,"cacheWriteTokens":0,"outputTokens":58213}}}}}}}}}}"#
+            )
+            .unwrap();
+        }
+
+        let mut summary = AgentSessionSummary::default();
+        let mut tool_counts = BTreeMap::new();
+        let mut recent_events = Vec::new();
+        let allowlist = HashSet::new();
+        let schema = test_schema();
+        summarize_events(
+            "test",
+            &path,
+            "test-session",
+            &mut summary,
+            &mut tool_counts,
+            &mut recent_events,
+            &allowlist,
+            &HashSet::new(),
+            &schema,
+        );
+
+        assert_eq!(summary.input_tokens, 1_442_027);
+        assert_eq!(summary.output_tokens, 58_213);
+        assert_eq!(summary.token_checkpoints.len(), 1);
+        assert_eq!(summary.token_checkpoints[0].input_tokens, 1_442_027);
+        assert_eq!(summary.token_checkpoints[0].output_tokens, 58_213);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn shutdown_model_metrics_sum_multiple_models_without_cache_read() {
+        let input = r#"{"type":"session.shutdown","data":{"modelMetrics":{"gpt-5.5":{"usage":{"inputTokens":1952371,"cacheReadTokens":1817600,"cacheWriteTokens":0,"outputTokens":12265}},"claude-haiku-4.5":{"usage":{"inputTokens":913294,"cacheReadTokens":819040,"cacheWriteTokens":88379,"outputTokens":9429}}}}}"#;
+        let mut summary = AgentSessionSummary::default();
+        let schema = test_schema();
+
+        fold_skipped_token_events(std::io::Cursor::new(input), &mut summary, &schema);
+
+        assert_eq!(summary.input_tokens, 229_025);
+        assert_eq!(summary.output_tokens, 21_694);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 /**
  * Visual layout snapshot tool for Copilot Mission Control.
  *
- * Boots `dist/game/index.html` in headless Chromium at a sequence of
+ * Boots `dist/index.html` in headless Chromium at a sequence of
  * viewport sizes (with the deterministic fixture installed) and writes
  * one PNG per size to ../.snapshots/ at the repo root. Intended as a
  * developer aid for iterating on the dashboard layout — *not* a CI
@@ -76,8 +76,8 @@ function parseViewportArgs() {
 }
 
 function startServer() {
-  if (!fs.existsSync(path.join(distDir, 'game', 'index.html'))) {
-    console.error(`Missing ${distDir}/game/index.html — run \`npm run build:frontend\` first.`);
+  if (!fs.existsSync(path.join(distDir, 'index.html'))) {
+    console.error(`Missing ${distDir}/index.html — run \`npm run build:frontend\` first.`);
     process.exit(1);
   }
   const child = spawn('python3', ['-m', 'http.server', '4173', '--directory', distDir], {
@@ -94,7 +94,7 @@ async function snapshot(page, viewport) {
   await page.addInitScript(fixture => {
     window.__missionControlFixture = fixture;
   }, KINGDOM_FIXTURE);
-  await page.goto('http://localhost:4173/game/index.html');
+  await page.goto('http://localhost:4173/index.html');
   await page.waitForFunction(() => {
     const g = window.__phaserGame;
     return !!g && g.scene?.isActive?.('mission-control');

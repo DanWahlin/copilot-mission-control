@@ -1,6 +1,6 @@
 // Copilot Mission Control — single-scene bootstrap.
 //
-// One Phaser game, one scene, no game-switcher, no ready screen.
+// One Phaser app, one scene, no switcher, no ready screen.
 // Boots directly into the Mission Control view as soon as the window
 // has real dimensions. Window size/position is restored across
 // launches by `tauri-plugin-window-state` on the Rust side, so we just
@@ -13,7 +13,7 @@ declare const Phaser: any;
 
 let game: any = null;
 
-function initGame() {
+function initApp() {
   refreshDimensions();
 
   game = new Phaser.Game({
@@ -42,7 +42,7 @@ function initGame() {
 // after window restoration before `innerWidth`/`innerHeight` settle.
 function tryBoot() {
   if (game) return;
-  if (window.innerWidth > 200 && window.innerHeight > 200) initGame();
+  if (window.innerWidth > 200 && window.innerHeight > 200) initApp();
 }
 
 tryBoot();
