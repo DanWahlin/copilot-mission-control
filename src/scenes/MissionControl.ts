@@ -39,7 +39,6 @@ interface EventPulse {
   edgeColor: number;
   startX: number;
   startY: number;
-  midX: number;
   endX: number;
   endY: number;
   progress: number;
@@ -154,14 +153,17 @@ interface MissionArtSet {
   centerMaxW: number;
   centerMaxH: number;
   quarterTextures: SectorTextureMap;
-  quarterSpriteYOffsets: Partial<Record<MissionCategory, number>>;
   quarterSpriteScale: Partial<Record<MissionCategory, number>>;
+  // Per-sector vertical nudge as a fraction of the sprite's display height.
+  // Positive values lift the sprite so artwork whose visible weight sits low
+  // in its (full-bleed) atlas frame reads as centered inside the disc.
+  quarterSpriteOffsetY: Partial<Record<MissionCategory, number>>;
 }
 
 const SPACE_ART_SET: MissionArtSet = {
   atlasKey: SPACE_ATLAS_KEY,
   centerTexture: 'outpost_domed_island',
-  centerYOffset: -16,
+  centerYOffset: -13,
   centerMaxW: 220,
   centerMaxH: 190,
   quarterTextures: {
@@ -175,12 +177,11 @@ const SPACE_ART_SET: MissionArtSet = {
     court: 'console_sphere',
     mcp: 'satellite_8panel',
   },
-  quarterSpriteYOffsets: {
-    forge: -8,
-    library: -8,
-  },
   quarterSpriteScale: {
     hooks: 0.82,
+  },
+  quarterSpriteOffsetY: {
+    library: 0.12,
   },
 };
 
@@ -201,11 +202,6 @@ const MEDIEVAL_ART_SET: MissionArtSet = {
     court: 'magic_shield',
     mcp: 'forest_portal',
   },
-  quarterSpriteYOffsets: {
-    signal: -6,
-    delegates: -4,
-    skills: -6,
-  },
   quarterSpriteScale: {
     terminal: 1.05,
     signal: 0.9,
@@ -214,6 +210,7 @@ const MEDIEVAL_ART_SET: MissionArtSet = {
     skills: 0.84,
     mcp: 0.9,
   },
+  quarterSpriteOffsetY: {},
 };
 
 const ART_SETS: Record<AppTheme, MissionArtSet> = {
@@ -686,29 +683,11 @@ export class MissionControlScene extends Phaser.Scene {
     this.renderActivity();
   }
 
-  /// Animated overlay on top of the static moat ring. Only shows when
-  /// the cached geometry says sessions are active; otherwise the ring
-  /// Images stay hidden so the base blue water reads as "calm".
+  /// The animated moat pulse ring around the central item has been
+  /// retired. Keep the pooled ring Images hidden so nothing renders
+  /// around the center; `moatGeometry` is still used for layout.
   private updateMoatPulse() {
     for (const ring of this.moatPulseRings) ring.setVisible(false).setActive(false);
-    const g = this.moatGeometry;
-    if (!g || !g.active) return;
-    // Two phase-offset rings, each a slow sine, so the pulse looks
-    // like ripples on the water rather than a hard blink. performance.now
-    // drives the phase so the animation continues smoothly across
-    // renderActivity() rebuilds.
-    const t = performance.now() / 1000;
-    const baseR = g.radius;
-    const ring = (index: number, offset: number, baseAlpha: number) => {
-      const visual = this.moatPulseRings[index];
-      if (!visual) return;
-      const phase = (Math.sin(t * 1.6 + offset) + 1) / 2;
-      const alpha = baseAlpha * (0.4 + phase * 0.6);
-      const radius = baseR + phase * 6;
-      this.showPooledImage(visual, g.x, g.y, radius * 2, 0x60ff9a, alpha);
-    };
-    ring(0, 0, 0.55);
-    ring(1, Math.PI, 0.32);
   }
 
   private updateCursorStyle() {
@@ -1232,11 +1211,16 @@ export class MissionControlScene extends Phaser.Scene {
   }
 
   private drawBackground() {
+    const layout = this.layout;
     if (theme.mode === 'light') {
       // Light mode uses a cool slate surface instead of a near-white wash
       // so the mission map reads as a designed cockpit, not an empty page.
       this.map.fillGradientStyle(0xf1f5fb, 0xf1f5fb, 0xd7e1ee, 0xdbe4ef, 1, 1, 1, 1);
       this.map.fillRect(0, 0, W, H);
+      if (layout) {
+        this.map.fillStyle(0xc2d7f2, 0.24);
+        this.map.fillEllipse(layout.centerX, layout.hubY, layout.radiusX * 2.45, layout.radiusY * 1.7);
+      }
       for (let i = 0; i < 22; i++) {
         const alpha = 0.04 + i * 0.0025;
         this.map.fillStyle(i % 2 === 0 ? 0xb9c6d9 : 0xcbd6e5, alpha);
@@ -1244,12 +1228,19 @@ export class MissionControlScene extends Phaser.Scene {
       }
       return;
     }
-    this.map.fillStyle(0x030712, 0.72);
+
+    this.map.fillGradientStyle(0x010514, 0x07112d, 0x020616, 0x0c1233, 1, 1, 1, 1);
     this.map.fillRect(0, 0, W, H);
+    if (layout) {
+      this.map.fillStyle(0x1a1b58, 0.2);
+      this.map.fillEllipse(layout.centerX, layout.hubY, layout.radiusX * 2.35, layout.radiusY * 1.7);
+      this.map.fillStyle(0x0bc6ff, 0.05);
+      this.map.fillEllipse(layout.centerX, layout.hubY, layout.radiusX * 1.4, layout.radiusY * 0.95);
+    }
 
     for (let i = 0; i < 22; i++) {
-      const alpha = 0.04 + i * 0.005;
-      this.map.fillStyle(i % 2 === 0 ? 0x0c1735 : 0x101b3d, alpha);
+      const alpha = 0.025 + i * 0.0035;
+      this.map.fillStyle(i % 2 === 0 ? 0x0c1735 : 0x172154, alpha);
       this.map.fillRect(0, (H / 22) * i, W, H / 18);
     }
   }
@@ -1257,8 +1248,7 @@ export class MissionControlScene extends Phaser.Scene {
   private drawQuarters() {
     const layout = this.layout!;
     const { centerX, hubY, s, quarterSize, quarterR } = layout;
-    const labelBlockH = Math.round(38 * Math.max(s, 0.85));
-    const frameH = quarterSize + labelBlockH;
+    this.drawOrbitalField(layout);
     this.drawCastle(centerX, hubY, s);
 
     // Find which quarter the inspector is currently showing so the
@@ -1275,46 +1265,52 @@ export class MissionControlScene extends Phaser.Scene {
       const quarter = this.quarters[i];
       const focused = i === inspectedIdx;
       const size = quarterSize;
-      const panelTop = quarter.y - size / 2;
-      // Extend the corner frame downward so the label + count sit cleanly
-      // inside the brackets, below the colored halo (outer radius 54*s,
-      // centered at quarter.y - 8s → bottom at quarter.y + 46s).
-      const light = theme.mode === 'light';
       // Sector colors intentionally render at full opacity so the sampled
       // reference palette stays visible against the dark mission backdrop.
       const haloAlpha = 1;
       // Every quarter renders with the same colored pedestal regardless
-      // of 24h activity count. We used to dim idle quarters to a grey
-      // wash, but that read as a visual "bug" against the surrounding
-      // active quarters — the activity badge in the corner already
-      // signals zero activity, so the desaturation was redundant noise.
+      // of 24h activity count. The activity badge in the corner already
+      // signals zero activity, so desaturating idle quarters was redundant noise.
       const pedestalColor = quarter.color;
-      // Draw the panel/backdrop FIRST so the colored pedestal circle
-      // can layer on top of it in dark mode. (Previously the outer
-      // circle was drawn first and then the near-opaque dark panel
-      // covered it, which is why the colored halos that were so
-      // visible in light mode disappeared in dark mode.) Light mode
-      // skips the panel fill entirely, so the circle still reads
-      // directly against the mission backdrop.
-      // Halo radius scales with quarterR (via pedestalUnit) instead of
-      // raw scene scale so it keeps its visual proportion when
-      // focus-mode bumps the quarter sprite size. labelStackH in
-      // computeLayout uses the same unit so labels follow.
+      // Background discs scale with quarterR (via pedestalUnit) instead of
+      // raw scene scale so they keep their visual proportion when focus-mode
+      // bumps the quarter sprite size. The sector frame/border was removed so
+      // the discs and sprite read directly against the mission backdrop.
+      // Radii are ~30.6% larger than the original pass (54/36/47 →
+      // 70.5375/47.025/61.39375) so each graphic fits comfortably inside the
+      // center fill circle.
       const pedestalUnit = quarterR / 64;
       const haloCenterY = quarter.y - 8 * pedestalUnit;
-      this.drawPixelPanel(quarter.x - size / 2, panelTop, size, frameH, quarter.color, focused, s);
-      this.map.fillStyle(pedestalColor, haloAlpha);
-      this.map.fillCircle(quarter.x, quarter.y - 8 * pedestalUnit, 50 * pedestalUnit);
+      const haloOuterR = 70.5375 * pedestalUnit;
+      const haloFillR = 47.025 * pedestalUnit;
+      const haloRingR = 61.39375 * pedestalUnit;
+      this.map.lineStyle(Math.max(1, Math.round(1.5 * s)), theme.mode === 'light' ? darkenColor(quarter.color, 0.7) : quarter.color, focused ? 0.72 : 0.4);
+      // Stop the spoke at the disc's outer edge (facing the hub) instead of
+      // running it into the sector center, so the line reads as a connector.
+      const spokeDx = centerX - quarter.x;
+      const spokeDy = hubY - haloCenterY;
+      const spokeLen = Math.hypot(spokeDx, spokeDy) || 1;
+      const spokeEndX = quarter.x + (spokeDx / spokeLen) * haloOuterR;
+      const spokeEndY = haloCenterY + (spokeDy / spokeLen) * haloOuterR;
+      this.map.lineBetween(centerX, hubY, spokeEndX, spokeEndY);
+      if (theme.mode === 'dark') {
+        this.map.fillStyle(theme.backdropFill, 1);
+        this.map.fillCircle(quarter.x, haloCenterY, haloOuterR);
+      }
+      this.map.fillStyle(pedestalColor, haloAlpha * (theme.mode === 'light' ? 0.2 : 0.36));
+      this.map.fillCircle(quarter.x, haloCenterY, haloOuterR);
+      this.map.fillStyle(pedestalColor, theme.mode === 'light' ? 0.38 : 0.72);
+      this.map.fillCircle(quarter.x, haloCenterY, haloFillR);
+      this.map.lineStyle(Math.max(1, Math.round(2 * pedestalUnit)), theme.mode === 'light' ? darkenColor(quarter.color, 0.64) : quarter.color, focused ? 0.95 : 0.62);
+      this.map.strokeCircle(quarter.x, haloCenterY, haloRingR);
       const artSet = this.activeArtSet();
       const texture = artSet.quarterTextures[quarter.key as keyof SectorTextureMap] ?? artSet.centerTexture;
-      // Constrain the sprite inside a square box (max W = max H = size * 0.72)
-      // centered on the halo pedestal. v2 atlas frames are mostly wide/square
-      // (aspect 0.9-1.5), so a 0.72 box fills the halo nicely without
-      // overflowing the bracket frame — the halo now nearly fills the
-      // selector width while leaving the sprite as the focal point.
+      // Constrain the sprite inside a square box centered on the disc.
+      // v2 atlas frames are mostly wide/square (aspect 0.9-1.5), so a 0.72
+      // box fills the disc nicely while leaving the sprite as the focal point.
       const spriteBox = size * 0.72 * (artSet.quarterSpriteScale[quarter.key] ?? 1);
       const fit = this.fitSpriteToBox(artSet.atlasKey, texture, spriteBox, spriteBox);
-      const spriteY = haloCenterY + (artSet.quarterSpriteYOffsets[quarter.key] ?? 0) * pedestalUnit;
+      const spriteY = haloCenterY - (artSet.quarterSpriteOffsetY[quarter.key] ?? 0) * fit.h;
       const sprite = this.add.image(quarter.x, spriteY, artSet.atlasKey, texture)
         .setOrigin(0.5, 0.5)
         .setDepth(7)
@@ -1324,13 +1320,12 @@ export class MissionControlScene extends Phaser.Scene {
       const sectorText = sectorTextMetrics(quarterR);
       const labelSize = sectorText.labelSize;
       const countSize = sectorText.countSize;
-      // Place the label just below the visible halo (which now scales
-      // with quarterR via pedestalUnit) with a small breathing gap so
-      // text never overlaps the disc.
-      const labelY = quarter.y + 42 * pedestalUnit + 8 + labelSize / 2;
+      // Place the label just below the visible ring with a small breathing
+      // gap so text never overlaps the enlarged disc.
+      const labelY = haloCenterY + haloRingR + 11 + labelSize / 2;
       const countY = labelY + labelSize / 2 + 6 + countSize / 2;
       const countColor = colorToCss(quarterTextColor(quarter.color));
-      this.addText(quarter.x, labelY, quarter.short, labelSize, theme.text).setOrigin(0.5);
+      this.addText(quarter.x, labelY, quarter.short.toUpperCase(), labelSize, theme.text).setOrigin(0.5);
       const countText = this.addText(quarter.x, countY, String(quarter.count), countSize, countColor).setOrigin(0.5);
       this.quarterCountTextObjects.set(quarter.key, countText);
     }
@@ -1345,33 +1340,17 @@ export class MissionControlScene extends Phaser.Scene {
     }
   }
 
-  private drawPixelPanel(x: number, y: number, w: number, h: number, color: number, focused: boolean, s: number) {
-    const px = snap(x);
-    const py = snap(y);
-    const pw = snap(w);
-    const ph = snap(h);
-    const border = Math.max(2, Math.round((focused ? 4 : 2) * s));
-    const notch = Math.max(10, Math.round(13 * s));
-    // Dark mode keeps the deep card so the sprites pop against the navy
-    // backdrop. Light mode lets the app background show through.
-    if (theme.mode !== 'light') {
-      this.map.fillStyle(0x020713, 0.5);
-      this.map.fillRect(px + 7 * s, py + 8 * s, pw, ph);
-      this.map.fillStyle(theme.panelBg, 0.94);
-      this.map.fillRect(px + notch, py, pw - notch * 2, ph);
-      this.map.fillRect(px, py + notch, pw, ph - notch * 2);
-    }
-    const bracketColor = theme.mode === 'light' ? darkenColor(color, 0.72) : color;
-    const bracketAlpha = 1;
-    this.map.fillStyle(bracketColor, bracketAlpha);
-    this.map.fillRect(px + notch, py, pw - notch * 2, border);
-    this.map.fillRect(px + notch, py + ph - border, pw - notch * 2, border);
-    this.map.fillRect(px, py + notch, border, ph - notch * 2);
-    this.map.fillRect(px + pw - border, py + notch, border, ph - notch * 2);
-    this.map.fillRect(px + border, py + notch - border, notch - border, border);
-    this.map.fillRect(px + pw - notch, py + notch - border, notch - border, border);
-    this.map.fillRect(px + border, py + ph - notch, notch - border, border);
-    this.map.fillRect(px + pw - notch, py + ph - notch, notch - border, border);
+  private drawOrbitalField(layout: MissionLayout) {
+    const { centerX, centerY, hubY, radiusX, radiusY, s } = layout;
+    const orbitColor = theme.mode === 'light' ? 0x315f9f : 0x61d6ff;
+    const secondaryColor = theme.mode === 'light' ? 0x7a4bc2 : 0xb86dff;
+    const ringY = hubY;
+    this.map.lineStyle(Math.max(1, Math.round(1.3 * s)), orbitColor, theme.mode === 'light' ? 0.18 : 0.32);
+    this.map.strokeEllipse(centerX, ringY, radiusX * 2.04, radiusY * 1.18);
+    this.map.lineStyle(Math.max(1, Math.round(1 * s)), secondaryColor, theme.mode === 'light' ? 0.14 : 0.22);
+    this.map.strokeEllipse(centerX, ringY, radiusX * 1.58, radiusY * 0.92);
+    this.map.lineStyle(Math.max(1, Math.round(0.8 * s)), 0xffffff, theme.mode === 'light' ? 0.16 : 0.18);
+    this.map.strokeEllipse(centerX, ringY, radiusX * 1.1, radiusY * 0.66);
   }
 
   private drawCastle(x: number, y: number, s = sceneScale()) {
@@ -1407,15 +1386,12 @@ export class MissionControlScene extends Phaser.Scene {
     const moatCx = x;
     const moatCy = y;
     const moatOuterR = 132 * castleScale;
-    // Faint surrounding glow so the moat reads as water, not a flat circle.
-    this.map.fillStyle(0x1d2a5a, 0.42);
-    this.map.fillCircle(moatCx, moatCy, moatOuterR + 4);
-    // Water body — solid blue disk filling the entire moat circle.
-    this.map.fillStyle(0x0d61f5, 1);
-    this.map.fillCircle(moatCx, moatCy, moatOuterR);
-    // Outer highlight — a lighter ring at the water's edge for depth.
-    this.map.lineStyle(Math.max(1, Math.round(1.5 * castleScale)), 0x6fb4ff, 0.55);
-    this.map.strokeCircle(moatCx, moatCy, moatOuterR - 1);
+    const light = theme.mode === 'light';
+    const violet = light ? 0x6250b5 : 0xc06cff;
+    this.map.fillStyle(light ? 0xd8e8fb : 0x071432, light ? 0.72 : 0.78);
+    this.map.fillEllipse(moatCx, moatCy + 12 * castleScale, moatOuterR * 1.9, moatOuterR * 0.64);
+    this.map.lineStyle(Math.max(1, Math.round(1.2 * castleScale)), violet, light ? 0.35 : 0.62);
+    this.map.strokeEllipse(moatCx, moatCy + 12 * castleScale, moatOuterR * 1.28, moatOuterR * 0.42);
 
     this.moatGeometry = {
       x: moatCx,
@@ -1430,13 +1406,14 @@ export class MissionControlScene extends Phaser.Scene {
     const castleFit = this.fitSpriteToBox(
       artSet.atlasKey,
       artSet.centerTexture,
-      artSet.centerMaxW * castleScale,
-      artSet.centerMaxH * castleScale,
+      artSet.centerMaxW * castleScale * 0.82,
+      artSet.centerMaxH * castleScale * 0.82,
     );
     const castle = this.add.image(x, y + artSet.centerYOffset * castleScale, artSet.atlasKey, artSet.centerTexture)
       .setOrigin(0.5, 0.5)
       .setDepth(6);
     castle.setDisplaySize(castleFit.w, castleFit.h);
+    castle.setAlpha(light ? 0.92 : 0.96);
     this.textObjects.push(castle);
   }
 
@@ -1776,6 +1753,18 @@ export class MissionControlScene extends Phaser.Scene {
     // toward a building reads as the same visual element. In light mode
     // brackets are darkened for contrast, so the pulse follows.
     const pulseColor = event.success ? quarterTextColor(quarter.color) : 0xff5252;
+    // End the pulse on the sector disc's outer edge facing the hub — the
+    // same point the spoke line stops at — so the dot travels straight
+    // along the spoke's exact angle and lands on the circle, not its center.
+    const quarterR = this.layout?.quarterR ?? 64;
+    const pedestalUnit = quarterR / 64;
+    const haloCenterY = quarter.y - 8 * pedestalUnit;
+    const haloOuterR = 70.5375 * pedestalUnit;
+    const edgeDx = castleX - quarter.x;
+    const edgeDy = castleY - haloCenterY;
+    const edgeLen = Math.hypot(edgeDx, edgeDy) || 1;
+    const endX = quarter.x + (edgeDx / edgeLen) * haloOuterR;
+    const endY = haloCenterY + (edgeDy / edgeLen) * haloOuterR;
     this.eventPulses.push({
       id: `${source}:${replayEventKey(event)}:${performance.now()}`,
       quarterKey,
@@ -1788,12 +1777,8 @@ export class MissionControlScene extends Phaser.Scene {
       // spawn well above or below the castle, breaking the metaphor.
       startX: castleX,
       startY: castleY,
-      midX: quarter.x,
-      endX: quarter.x,
-      // Stop just short of the quarter sprite center so the arrival
-      // sigil at quarter.x/y reads as the building "receiving" the
-      // pulse rather than the pulse driving through it.
-      endY: quarter.y + (quarter.y < castleY ? -36 * s : 36 * s),
+      endX,
+      endY,
       progress: 0,
       duration: 900,
       delay,
@@ -1832,15 +1817,8 @@ export class MissionControlScene extends Phaser.Scene {
         if (sampleProgress <= 0) continue;
         let tx: number;
         let ty: number;
-        if (sampleProgress < 0.55) {
-          const local = sampleProgress / 0.55;
-          tx = pulse.startX + (pulse.midX - pulse.startX) * local;
-          ty = pulse.startY;
-        } else {
-          const local = (sampleProgress - 0.55) / 0.45;
-          tx = pulse.endX;
-          ty = pulse.startY + (pulse.endY - pulse.startY) * local;
-        }
+        tx = pulse.startX + (pulse.endX - pulse.startX) * sampleProgress;
+        ty = pulse.startY + (pulse.endY - pulse.startY) * sampleProgress;
         const trailT = (i + 1) / PULSE_TRAIL_SAMPLES;
         const sz = headSize * (1 - trailT * 0.65);
         if (light) {
@@ -1855,15 +1833,8 @@ export class MissionControlScene extends Phaser.Scene {
       // the additive blend without smearing.
       let headX: number;
       let headY: number;
-      if (pulse.progress < 0.55) {
-        const local = pulse.progress / 0.55;
-        headX = pulse.startX + (pulse.midX - pulse.startX) * local;
-        headY = pulse.startY;
-      } else {
-        const local = (pulse.progress - 0.55) / 0.45;
-        headX = pulse.endX;
-        headY = pulse.startY + (pulse.endY - pulse.startY) * local;
-      }
+      headX = pulse.startX + (pulse.endX - pulse.startX) * pulse.progress;
+      headY = pulse.startY + (pulse.endY - pulse.startY) * pulse.progress;
       if (light) {
         this.showPooledImage(this.nextPulseEdgeVisual(), headX, headY, headSize * 2.15, pulse.edgeColor, 0.24);
         this.showPooledImage(this.nextPulseEdgeVisual(), headX, headY, headSize * 1.42, pulse.edgeColor, 0.86);

@@ -8,6 +8,10 @@ All notable changes to Copilot Mission Control.
 - Feat: add global history analytics feature with detailed session tracking
 - Feat: add mission layout and types for Copilot activity
 
+### ⚙️ CI/CD & Build
+
+- Release v0.1.8
+
 ### 💼 Other
 
 - Refine mission control history UI
