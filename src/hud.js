@@ -844,6 +844,7 @@
   var appRoute = routeFromHash();
   var historyFetchFrame = 0;
   var historyFetchTimer = 0;
+  var historyBarRefreshFrame = 0;
 
   function nowMs() {
     return window.performance && typeof window.performance.now === 'function'
@@ -902,6 +903,10 @@
 
   function unloadHistoryRoute() {
     cancelScheduledHistoryFetch();
+    if (historyBarRefreshFrame) {
+      window.cancelAnimationFrame(historyBarRefreshFrame);
+      historyBarRefreshFrame = 0;
+    }
     liveFingerprints.history = '';
     openHistoryFailureKeys.clear();
     if (historyLiveStamp) historyLiveStamp.textContent = 'Open History to load analytics';
@@ -1748,12 +1753,44 @@
     return String(value || '').toLowerCase().replace(/[^a-z0-9_-]+/g, '-');
   }
 
-  function historyCategoryColor(category) {
-    return CATEGORY_COLORS[category] || CATEGORY_COLORS.activity || '#61d6ff';
+  function historyCategoryFillClass(category) {
+    var key = cssToken(category);
+    return CATEGORY_COLORS[key] ? 'history-fill-category-' + key : 'history-bar-svg-fill';
   }
 
-  function historyPaletteColor(index) {
-    return 'var(--history-palette-' + (Math.max(0, index) % 8) + ')';
+  function historyPaletteFillClass(index) {
+    return 'history-fill-palette-' + (Math.max(0, index) % 8);
+  }
+
+  function historySvgPercent(percent) {
+    var value = Number(percent || 0);
+    if (!Number.isFinite(value) || value <= 0) return 0;
+    return Math.max(0.25, Math.min(100, value));
+  }
+
+  function historyLeftRoundedPath(width, height) {
+    var fillWidth = Number(width || 0);
+    var barHeight = Number(height || 10);
+    if (!Number.isFinite(fillWidth) || fillWidth <= 0 || !Number.isFinite(barHeight) || barHeight <= 0) return '';
+    var radiusY = barHeight / 2;
+    var radiusX = Math.min(radiusY, fillWidth);
+    var curve = 0.5522847498;
+    return [
+      'M', radiusX, 0,
+      'H', fillWidth,
+      'V', barHeight,
+      'H', radiusX,
+      'C', radiusX - radiusX * curve, barHeight, 0, radiusY + radiusY * curve, 0, radiusY,
+      'C', 0, radiusY - radiusY * curve, radiusX - radiusX * curve, 0, radiusX, 0,
+      'Z',
+    ].join(' ');
+  }
+
+  function historyFillWidth(percent, totalWidth) {
+    var pct = historySvgPercent(percent);
+    var width = Number(totalWidth || 100);
+    if (pct <= 0 || !Number.isFinite(width) || width <= 0) return 0;
+    return Math.min(width, Math.max(1, (pct / 100) * width));
   }
 
   function historyBarPercent(value, max) {
@@ -1771,29 +1808,59 @@
     return historyBarPercent(metric && metric.count, max);
   }
 
-  function renderHistoryBar(percent, color) {
+  function renderHistoryBar(percent, fillClass) {
+    var fillWidth = historyFillWidth(percent, 100);
     return '<div class="history-bar" aria-hidden="true">'
-      + '<div class="history-bar-fill" style="width:' + percent + '%;background:' + escapeHtml(color) + '"></div>'
-      + '</div>';
-  }
-
-  function renderHistoryVerticalBar(percent, color) {
-    var height = Math.max(0, Math.min(100, Number(percent || 0)));
-    var y = 100 - height;
-    return '<div class="history-bar" aria-hidden="true">'
-      + '<svg class="history-bar-svg history-bar-svg-vertical" viewBox="0 0 100 100" preserveAspectRatio="none" focusable="false">'
-      + '<rect class="history-bar-svg-fill" x="0" y="' + y + '" width="100" height="' + height + '" rx="5" fill="' + escapeHtml(color) + '"></rect>'
+      + '<svg class="history-bar-svg history-bar-svg-horizontal" data-history-width="100" viewBox="0 0 100 10" preserveAspectRatio="none" focusable="false">'
+      + '<path class="history-bar-svg-fill ' + escapeHtml(fillClass) + '" data-percent="' + historySvgPercent(percent) + '" d="' + historyLeftRoundedPath(fillWidth, 10) + '"></path>'
       + '</svg>'
       + '</div>';
   }
 
-  function renderHistoryDistributionBar(barPercent, failurePercent, color) {
+  function renderHistoryVerticalBar(percent, fillClass) {
+    var height = Math.max(0, Math.min(100, Number(percent || 0)));
+    var y = 100 - height;
+    return '<div class="history-bar" aria-hidden="true">'
+      + '<svg class="history-bar-svg history-bar-svg-vertical" viewBox="0 0 100 100" preserveAspectRatio="none" focusable="false">'
+      + '<rect class="history-bar-svg-fill ' + escapeHtml(fillClass) + '" x="0" y="' + y + '" width="100" height="' + height + '" rx="5"></rect>'
+      + '</svg>'
+      + '</div>';
+  }
+
+  function renderHistoryDistributionBar(barPercent, failurePercent, fillClass) {
     var bar = Math.max(0, Math.min(100, Number(barPercent || 0)));
     var failure = Math.max(0, Math.min(100, Number(failurePercent || 0)));
     return '<div class="history-distribution-bar" aria-hidden="true">'
-      + '<div class="history-distribution-fill" style="width:' + bar + '%;background:' + escapeHtml(color) + '"></div>'
-      + '<div class="history-distribution-failure" style="width:' + failure + '%"></div>'
+      + '<svg class="history-bar-svg history-distribution-svg" data-history-width="100" viewBox="0 0 100 10" preserveAspectRatio="none" focusable="false">'
+      + '<path class="history-distribution-fill ' + escapeHtml(fillClass) + '" data-percent="' + historySvgPercent(bar) + '" d="' + historyLeftRoundedPath(historyFillWidth(bar, 100), 10) + '"></path>'
+      + '<path class="history-distribution-failure" data-percent="' + historySvgPercent(failure) + '" d="' + historyLeftRoundedPath(historyFillWidth(failure, 100), 10) + '"></path>'
+      + '</svg>'
       + '</div>';
+  }
+
+  function refreshHistoryBarShapes(root) {
+    var scope = root || document;
+    var svgs = scope.querySelectorAll('.history-bar-svg-horizontal, .history-distribution-svg');
+    svgs.forEach(function (svg) {
+      var rect = svg.getBoundingClientRect();
+      var width = Math.round(rect.width || Number(svg.getAttribute('data-history-width')) || 100);
+      var height = Number(svg.viewBox && svg.viewBox.baseVal && svg.viewBox.baseVal.height) || 10;
+      if (!Number.isFinite(width) || width <= 0) return;
+      svg.setAttribute('data-history-width', String(width));
+      svg.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
+      svg.querySelectorAll('path[data-percent]').forEach(function (path) {
+        var percent = Number(path.getAttribute('data-percent') || 0);
+        path.setAttribute('d', historyLeftRoundedPath(historyFillWidth(percent, width), height));
+      });
+    });
+  }
+
+  function scheduleHistoryBarShapeRefresh() {
+    if (historyBarRefreshFrame || !historyContent) return;
+    historyBarRefreshFrame = window.requestAnimationFrame(function () {
+      historyBarRefreshFrame = 0;
+      if (appRoute === 'history') refreshHistoryBarShapes(historyContent);
+    });
   }
 
   function historyMetricTotal(history, field, fallback) {
@@ -1992,13 +2059,13 @@
     var body = rows.length && max > 0
       ? '<div class="history-rank-list' + escapeHtml(listClass) + '">' + rows.map(function (metric, index) {
           var name = metric.name || 'Unknown';
-          var color = options && options.categoryColors ? historyCategoryColor(name) : (options && options.paletteColors ? historyPaletteColor(index) : 'var(--history-activity)');
+          var fillClass = options && options.categoryColors ? historyCategoryFillClass(name) : (options && options.paletteColors ? historyPaletteFillClass(index) : 'history-bar-svg-fill');
           var label = options && options.categoryLabels ? categoryLabel(name) : name;
           var pct = Number(metric.percent || 0);
           var countLabel = exactNumber(metric.count || 0) + (pct > 0 ? ' · ' + pct.toFixed(1).replace(/\.0$/, '') + '%' : '');
           return '<div class="history-rank-row">'
             + '<div class="history-rank-meta"><span class="history-rank-name" title="' + escapeHtml(label) + '">' + escapeHtml(label) + '</span><span>' + escapeHtml(countLabel) + '</span></div>'
-            + renderHistoryBar(historyMetricBarPercent(metric, max), color)
+            + renderHistoryBar(historyMetricBarPercent(metric, max), fillClass)
             + '</div>';
         }).join('') + '</div>'
       : '<div class="history-empty">' + escapeHtml(empty) + '</div>';
@@ -2017,13 +2084,13 @@
     var body = rows.length && max > 0
       ? '<div class="history-rank-list compact-ranks vertical-ranks">' + rows.map(function (metric, index) {
           var name = metric.name || 'Unknown';
-          var color = options && options.categoryColors ? historyCategoryColor(name) : (options && options.paletteColors ? historyPaletteColor(index) : 'var(--history-activity)');
+          var fillClass = options && options.categoryColors ? historyCategoryFillClass(name) : (options && options.paletteColors ? historyPaletteFillClass(index) : 'history-bar-svg-fill');
           var label = options && options.categoryLabels ? categoryLabel(name) : name;
           var pct = Number(metric.percent || 0);
           var countLabel = exactNumber(metric.count || 0) + (pct > 0 ? ' · ' + pct.toFixed(1).replace(/\.0$/, '') + '%' : '');
           return '<div class="history-rank-row">'
             + '<div class="history-rank-meta"><span class="history-rank-name" title="' + escapeHtml(label) + '">' + escapeHtml(label) + '</span><span>' + escapeHtml(countLabel) + '</span></div>'
-            + renderHistoryVerticalBar(historyMetricBarPercent(metric, max), color)
+            + renderHistoryVerticalBar(historyMetricBarPercent(metric, max), fillClass)
             + '</div>';
         }).join('') + '</div>'
       : '<div class="history-empty">' + escapeHtml(empty) + '</div>';
@@ -2064,10 +2131,10 @@
           var failures = Number(session.error_count || 0);
           var failurePct = events > 0 ? Math.max(0, Math.min(100, (failures / events) * 100)) : 0;
           var barPct = historyBarPercent(events, max);
-          var color = historyPaletteColor(index);
+          var fillClass = historyPaletteFillClass(index);
           return '<div class="history-distribution-row">'
             + '<div class="history-rank-meta"><span class="history-rank-name" title="' + escapeHtml(title) + '">' + escapeHtml(title) + '</span><span>' + escapeHtml(exactNumber(events) + ' events') + '</span></div>'
-            + renderHistoryDistributionBar(barPct, failurePct.toFixed(1), color)
+            + renderHistoryDistributionBar(barPct, failurePct.toFixed(1), fillClass)
             + '<div class="history-row-meta">' + escapeHtml(exactNumber(failures) + ' failures · ' + (session.last_model || 'model unknown')) + '</div>'
             + '</div>';
         }).join('') + '</div>'
@@ -2211,6 +2278,8 @@
       + renderHistoryFailures(history.recent_failures)
       + '</div>'
       + '</section>';
+    refreshHistoryBarShapes(historyContent);
+    scheduleHistoryBarShapeRefresh();
   }
 
   window.__cmcRenderDashboard = function (view) {
@@ -2414,6 +2483,9 @@
   }
   window.addEventListener('hashchange', function () {
     applyAppRoute(routeFromHash(), { syncHash: false, focus: true });
+  });
+  window.addEventListener('resize', function () {
+    if (appRoute === 'history') scheduleHistoryBarShapeRefresh();
   });
   applyAppRoute(appRoute, { syncHash: false, focus: false });
 

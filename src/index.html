@@ -1401,11 +1401,28 @@
       overflow: hidden;
       background: rgba(128, 148, 180, 0.18);
     }
-    .history-bar-fill {
-      height: 100%;
-      min-width: 2px;
-      border-radius: 999px 0 0 999px;
+    .history-bar-svg-fill,
+    .history-distribution-fill {
+      fill: var(--history-activity);
     }
+    .history-fill-palette-0 { fill: var(--history-palette-0); }
+    .history-fill-palette-1 { fill: var(--history-palette-1); }
+    .history-fill-palette-2 { fill: var(--history-palette-2); }
+    .history-fill-palette-3 { fill: var(--history-palette-3); }
+    .history-fill-palette-4 { fill: var(--history-palette-4); }
+    .history-fill-palette-5 { fill: var(--history-palette-5); }
+    .history-fill-palette-6 { fill: var(--history-palette-6); }
+    .history-fill-palette-7 { fill: var(--history-palette-7); }
+    .history-fill-category-forge { fill: #f0911d; }
+    .history-fill-category-library { fill: #e1ae45; }
+    .history-fill-category-terminal { fill: #86d4b7; }
+    .history-fill-category-signal { fill: #c37ee8; }
+    .history-fill-category-hooks { fill: #61d6ff; }
+    .history-fill-category-delegates { fill: #fc60c7; }
+    .history-fill-category-skills { fill: #da58e0; }
+    .history-fill-category-court { fill: #2fc5e8; }
+    .history-fill-category-mcp { fill: #45cea5; }
+    .history-fill-category-alert { fill: #ff5252; }
     .history-bar-svg {
       display: block;
       width: 100%;
@@ -1426,18 +1443,8 @@
       border-radius: 999px;
       background: rgba(128, 148, 180, 0.18);
     }
-    .history-distribution-fill,
     .history-distribution-failure {
-      position: absolute;
-      top: 0;
-      bottom: 0;
-      left: 0;
-      min-width: 2px;
-      border-radius: 999px 0 0 999px;
-    }
-    .history-distribution-failure {
-      min-width: 0;
-      background: var(--history-failure);
+      fill: var(--history-failure);
       mix-blend-mode: screen;
     }
     .history-session-row,

@@ -944,12 +944,12 @@ test.describe('Copilot Mission Control — History', () => {
       const screen = document.querySelector('#history-screen') as HTMLElement;
       const activity = document.querySelector('[data-history-card="history-24h"] rect.activity') as SVGElement;
       const activityFills = new Set(Array.from(document.querySelectorAll('[data-history-card="history-24h"] rect.activity')).map((el) => getComputedStyle(el).fill));
-      const topToolFill = document.querySelector('[data-history-card="top-tools"] .history-bar-fill') as HTMLElement;
-      const modelFill = document.querySelector('[data-history-card="models-used"] .history-bar-fill') as HTMLElement;
+      const topToolFill = document.querySelector('[data-history-card="top-tools"] .history-bar-svg-fill') as SVGElement;
+      const modelFill = document.querySelector('[data-history-card="models-used"] .history-bar-svg-fill') as SVGElement;
       const eventMixFill = document.querySelector('[data-history-card="event-mix"] .history-bar-svg-fill') as SVGElement;
       const eventMixSvg = document.querySelector('[data-history-card="event-mix"] .history-bar-svg') as SVGElement;
       const eventMixBar = document.querySelector('[data-history-card="event-mix"] .history-bar') as HTMLElement;
-      const sessionFill = document.querySelector('[data-history-card="session-distribution"] .history-distribution-fill') as HTMLElement;
+      const sessionFill = document.querySelector('[data-history-card="session-distribution"] .history-distribution-fill') as SVGElement;
       const panelTitle = document.querySelector('.cmc-panel-title') as HTMLElement;
       const historyTitle = document.querySelector('[data-history-card="models-used"] .history-card-title') as HTMLElement;
       const legendItems = Array.from(document.querySelectorAll('[data-history-card="history-24h"] .history-legend span')).map((el) => (el.textContent || '').trim());
@@ -958,6 +958,15 @@ test.describe('Copilot Mission Control — History', () => {
       const kpis = document.querySelector('.history-kpis') as HTMLElement;
       const historyHeader = document.querySelector('.history-header') as HTMLElement;
       const historyFilter = document.querySelector('.history-filter') as HTMLElement;
+      const leftCapShape = (el: SVGElement) => {
+        const path = el.getAttribute('d') || '';
+        const match = path.match(/^M 5 0 H ([\d.]+) V 10 H 5 C 2\.238576251 10 0 7\.761423749 0 5 C 0 2\.238576251 2\.238576251 0 5 0 Z$/);
+        return {
+          flatRight: Boolean(match),
+          fillWidth: match ? Number(match[1]) : 0,
+          viewBoxWidth: Number(((el.closest('svg') as SVGElement).getAttribute('viewBox') || '').split(' ')[2] || 0),
+        };
+      };
       const rowBgProbe = document.createElement('span');
       rowBgProbe.style.color = 'var(--history-row-bg)';
       screen.appendChild(rowBgProbe);
@@ -969,19 +978,20 @@ test.describe('Copilot Mission Control — History', () => {
         activityFillCount: activityFills.size,
         failureRects: document.querySelectorAll('[data-history-card="history-24h"] rect.failure').length,
         nonTimeChartFills: {
-          topToolWidth: topToolFill.style.width,
-          topToolBackground: getComputedStyle(topToolFill).backgroundColor,
-          topToolRadius: getComputedStyle(topToolFill).borderTopLeftRadius + ' ' + getComputedStyle(topToolFill).borderTopRightRadius,
-          modelWidth: modelFill.style.width,
-          modelBackground: getComputedStyle(modelFill).backgroundColor,
+          topToolShape: leftCapShape(topToolFill),
+          topToolFill: getComputedStyle(topToolFill).fill,
+          topToolInlineStyle: topToolFill.getAttribute('style'),
+          modelShape: leftCapShape(modelFill),
+          modelFill: getComputedStyle(modelFill).fill,
+          modelInlineStyle: modelFill.getAttribute('style'),
           eventMixHeight: eventMixFill.getAttribute('height'),
           eventMixFill: getComputedStyle(eventMixFill).fill,
           eventMixSvgDisplay: getComputedStyle(eventMixSvg).display,
           eventMixSvgHeight: Math.round(eventMixSvg.getBoundingClientRect().height),
           eventMixSvgBottomDelta: Math.round(eventMixBar.getBoundingClientRect().bottom - eventMixSvg.getBoundingClientRect().bottom),
-          sessionWidth: sessionFill.style.width,
-          sessionBackground: getComputedStyle(sessionFill).backgroundColor,
-          sessionRadius: getComputedStyle(sessionFill).borderTopLeftRadius + ' ' + getComputedStyle(sessionFill).borderTopRightRadius,
+          sessionShape: leftCapShape(sessionFill),
+          sessionFill: getComputedStyle(sessionFill).fill,
+          sessionInlineStyle: sessionFill.getAttribute('style'),
         },
         legendItems,
         titleStylesMatch: {
@@ -1003,19 +1013,32 @@ test.describe('Copilot Mission Control — History', () => {
       activityFillCount: 1,
       failureRects: 0,
       nonTimeChartFills: {
-        topToolWidth: '29.8%',
-        topToolBackground: 'rgb(15, 99, 206)',
-        topToolRadius: '999px 0px',
-        modelWidth: '75%',
-        modelBackground: 'rgb(15, 99, 206)',
+        topToolShape: {
+          flatRight: true,
+          fillWidth: expect.any(Number),
+          viewBoxWidth: expect.any(Number),
+        },
+        topToolFill: 'rgb(15, 99, 206)',
+        topToolInlineStyle: null,
+        modelShape: {
+          flatRight: true,
+          fillWidth: expect.any(Number),
+          viewBoxWidth: expect.any(Number),
+        },
+        modelFill: 'rgb(15, 99, 206)',
+        modelInlineStyle: null,
         eventMixHeight: '39.1',
         eventMixFill: 'rgb(225, 174, 69)',
         eventMixSvgDisplay: 'block',
         eventMixSvgHeight: 120,
         eventMixSvgBottomDelta: 0,
-        sessionWidth: '100%',
-        sessionBackground: 'rgb(15, 99, 206)',
-        sessionRadius: '999px 0px',
+        sessionShape: {
+          flatRight: true,
+          fillWidth: expect.any(Number),
+          viewBoxWidth: expect.any(Number),
+        },
+        sessionFill: 'rgb(15, 99, 206)',
+        sessionInlineStyle: null,
       },
       legendItems: ['Events'],
       titleStylesMatch: {
@@ -1030,6 +1053,12 @@ test.describe('Copilot Mission Control — History', () => {
       filterBorderWidth: '0px',
       filterBackground: 'rgba(0, 0, 0, 0)',
     });
+    expect(colors.nonTimeChartFills.topToolShape.fillWidth).toBeGreaterThan(5);
+    expect(colors.nonTimeChartFills.topToolShape.viewBoxWidth).toBeGreaterThan(100);
+    expect(colors.nonTimeChartFills.modelShape.fillWidth).toBeGreaterThan(5);
+    expect(colors.nonTimeChartFills.modelShape.viewBoxWidth).toBeGreaterThan(100);
+    expect(colors.nonTimeChartFills.sessionShape.fillWidth).toBeGreaterThan(5);
+    expect(colors.nonTimeChartFills.sessionShape.viewBoxWidth).toBeGreaterThan(100);
     expect(colors.kpiWidthRatio).toBeGreaterThan(0.92);
     expect(colors.kpiWidthRatio).toBeLessThanOrEqual(1);
   });
