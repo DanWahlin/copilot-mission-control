@@ -589,6 +589,8 @@ struct WorkspaceSchema {
 #[derive(serde::Deserialize, Clone)]
 struct EventsSchema {
     event_type_paths: Vec<String>,
+    #[serde(default)]
+    known_event_types: Vec<String>,
     tool_start: String,
     tool_complete: String,
     assistant_message: String,
@@ -3135,8 +3137,10 @@ impl SchemaDriftAccumulator {
         let missing_event_type_ratio = stats.missing_event_type as f64 / stats.total_events as f64;
         let unknown_ratio =
             stats.unknown_event_types.values().sum::<usize>() as f64 / stats.total_events as f64;
-        let tool_counts_missing =
-            summary.event_count >= 25 && summary.tool_count == 0 && summary.hooks_count == 0;
+        let tool_counts_missing = stats.total_events >= 25
+            && stats.tool_starts == 0
+            && stats.tool_completes >= 3
+            && summary.hooks_count == 0;
         let event_type_missing = stats.total_events >= 25 && missing_event_type_ratio >= 0.75;
         let many_unknown_events = stats.total_events >= 25 && unknown_ratio >= 0.5;
 
@@ -3145,7 +3149,7 @@ impl SchemaDriftAccumulator {
         }
         if tool_counts_missing {
             self.hints.insert(
-                "No tool starts were recognized in an active event window; check tool_start, tool_name_paths, and tool_call_id_paths.".to_string(),
+                "Tool completions were recognized but no tool starts were found; check tool_start and event window boundaries.".to_string(),
             );
         }
         if event_type_missing {
@@ -3200,7 +3204,12 @@ impl SchemaDriftAccumulator {
 }
 
 fn is_schema_known_event(event_type: &str, schema: &ProviderSchema) -> bool {
-    event_type == schema.events.tool_start
+    schema
+        .events
+        .known_event_types
+        .iter()
+        .any(|known| known == event_type)
+        || event_type == schema.events.tool_start
         || event_type == schema.events.tool_complete
         || event_type == schema.events.assistant_message
         || event_type == schema.events.assistant_turn_start
@@ -5077,7 +5086,7 @@ mod tests {
     fn bundled_provider_schema_parses_and_validates() {
         let schema = test_schema();
         assert_eq!(schema.provider, "copilot");
-        assert_eq!(schema.schema_version, "1.2.2");
+        assert_eq!(schema.schema_version, "1.2.3");
         assert!(schema
             .session
             .relevant_files
@@ -5088,12 +5097,69 @@ mod tests {
 
     #[test]
     fn published_provider_schema_matches_bundled_schema() {
-        let published = include_str!("../../docs/provider-schemas/copilot/1.2.2.json");
+        let published = include_str!("../../docs/provider-schemas/copilot/1.2.3.json");
         assert_eq!(published, BUNDLED_COPILOT_SCHEMA);
         assert_eq!(
             sha256_hex(published),
-            "b9f7391a340636e03293b5a2f07ff0f28ba4b3ab159e42e770914df406a1a186"
+            "432534147764d5cfb3a64205e9ad7d4391c1624694491f8496cb92be49d6239e"
         );
+    }
+
+    #[test]
+    fn current_copilot_lifecycle_events_are_schema_known() {
+        let schema = test_schema();
+        for event_type in [
+            "system.message",
+            "session.usage_checkpoint",
+            "session.permissions_changed",
+            "session.mode_changed",
+            "session.task_complete",
+        ] {
+            assert!(is_schema_known_event(event_type, &schema), "{event_type}");
+        }
+    }
+
+    #[test]
+    fn isolated_tool_completion_does_not_report_schema_drift() {
+        let mut accumulator = SchemaDriftAccumulator::new("copilot", "1.2.3");
+        let summary = AgentSessionSummary {
+            event_count: 25,
+            ..Default::default()
+        };
+        let stats = SessionSchemaStats {
+            total_events: 25,
+            recognized_events: 25,
+            tool_completes: 1,
+            ..Default::default()
+        };
+
+        accumulator.record_session(&summary, &stats);
+
+        assert!(accumulator.into_report().is_none());
+    }
+
+    #[test]
+    fn repeated_tool_completions_without_starts_report_schema_drift() {
+        let mut accumulator = SchemaDriftAccumulator::new("copilot", "1.2.3");
+        let summary = AgentSessionSummary {
+            event_count: 25,
+            ..Default::default()
+        };
+        let stats = SessionSchemaStats {
+            total_events: 25,
+            recognized_events: 25,
+            tool_completes: 3,
+            ..Default::default()
+        };
+
+        accumulator.record_session(&summary, &stats);
+
+        let report = accumulator.into_report().expect("schema drift report");
+        assert_eq!(report.affected_sessions, 1);
+        assert!(report
+            .hints
+            .iter()
+            .any(|hint| hint.contains("no tool starts")));
     }
 
     #[test]

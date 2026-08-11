@@ -6,6 +6,10 @@ All notable changes to Agent Mission Control.
 ### 🐛 Bug Fixes
 
 - Fix Linux launch crash when the appindicator tray library is missing
+
+### ⚙️ CI/CD & Build
+
+- Release v0.2.15
 ## [0.2.14] - 2026-06-25
 
 ### ⚙️ CI/CD & Build
